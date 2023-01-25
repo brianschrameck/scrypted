@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, Method } from 'axios';
 import https from 'https';
+import { sleep } from '@scrypted/common/src/sleep';
 
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
@@ -53,6 +54,7 @@ export class BaseStationApiClient {
 
     private async sendRequest<T>(url?: string, method?: Method, data?: any): Promise<T> {
         try {
+            await sleep(200);
             const response = await this.client.request<T>({ url, method, data })
             return response.data;
         } catch (error) {

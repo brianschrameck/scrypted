@@ -15,13 +15,9 @@ class ArloCameraPlugin extends ScryptedDeviceBase implements DeviceProvider, Dev
             title: 'Base Station API Host',
             description: 'The URL of your arlo-cam-api, including protocol and port.',
             placeholder: 'http://192.168.1.100:5000',
-            onPut: async () => this.clearTryDiscoverDevices(),
+            onPut: async () => this.discoverDevices(0),
         },
     });
-
-    clearTryDiscoverDevices() {
-        this.discoverDevices(0);
-    }
 
     /** Settings */
 
@@ -35,7 +31,7 @@ class ArloCameraPlugin extends ScryptedDeviceBase implements DeviceProvider, Dev
 
     /** DeviceDiscovery */
 
-    async discoverDevices(duration: number) {
+    async discoverDevices(duration?: number) {
         this.console.info("Discovering devices...")
         this.arloDevices.clear();
         const devices: Device[] = [];
@@ -46,12 +42,12 @@ class ArloCameraPlugin extends ScryptedDeviceBase implements DeviceProvider, Dev
         if (!listCamerasResponse) {
             return;
         }
-        const cameras = new Map(listCamerasResponse.map((obj) => [obj.serial_number, obj]));
+        const cameraSummaries = new Map(listCamerasResponse.map((obj) => [obj.serial_number, obj]));
 
         // generate a new status for each camera in parallel
         const generateStatusPromises: Promise<BaseStationCameraResponse>[] = [];
-        cameras.forEach((camera: BaseStationCameraSummary) => {
-            const serialNumber = camera.serial_number;
+        cameraSummaries.forEach((cameraSummary: BaseStationCameraSummary) => {
+            const serialNumber = cameraSummary.serial_number;
             const generateStatusPromise = this.baseStationApiClient.postGenerateStatusRequest(serialNumber);
             generateStatusPromises.push(generateStatusPromise);
             generateStatusPromise.catch(error => {
@@ -92,20 +88,18 @@ class ArloCameraPlugin extends ScryptedDeviceBase implements DeviceProvider, Dev
                 const cameraStatus = statusPromiseResult.value;
                 const serialNumber = cameraStatus.SystemSerialNumber;
                 this.console.debug(`Status retrieved for ${serialNumber}.`);
-                const camera = cameras.get(serialNumber);
-                const nativeId = camera.serial_number;
-                const arloCamera = new ArloCamera(this, nativeId, camera, cameraStatus);
+                const cameraSummary = cameraSummaries.get(serialNumber);
+                const arloCamera = new ArloCamera(this, cameraSummary.serial_number, cameraSummary, cameraStatus);
+                this.arloDevices.set(arloCamera.nativeId, arloCamera);
 
-                const device: Device = {
+                devices.push({
                     name: arloCamera.cameraSummary.friendly_name,
                     nativeId: arloCamera.nativeId,
                     type: ScryptedDeviceType.Camera,
                     interfaces: [
-                        ScryptedInterface.Battery,
-                        ScryptedInterface.AudioSensor,
                         ScryptedInterface.Camera,
                         ScryptedInterface.VideoCamera,
-                        ScryptedInterface.MotionSensor,
+                        ScryptedInterface.Settings,
                     ],
                     info: {
                         firmware: arloCamera.cameraStatus.SystemFirmwareVersion,
@@ -114,10 +108,7 @@ class ArloCameraPlugin extends ScryptedDeviceBase implements DeviceProvider, Dev
                         serialNumber: arloCamera.cameraStatus.SystemSerialNumber,
                         version: arloCamera.cameraStatus.HardwareRevision,
                     },
-                };
-
-                this.arloDevices.set(arloCamera.nativeId, arloCamera);
-                devices.push(device);
+                });
 
                 this.console.info(`Discovered device ${arloCamera.nativeId}`);
             }

@@ -7,7 +7,7 @@ import { BaseStationCameraSummary, BaseStationCameraStatus } from './base-statio
 import { listenZero } from '@scrypted/common/src/listen-cluster'
 const { mediaManager } = sdk;
 
-export class ArloCamera extends ScryptedDeviceBase implements Battery, Camera, VideoCamera, Settings {
+export class ArloCamera extends ScryptedDeviceBase implements Camera, VideoCamera, Settings {
     pendingPicture: Promise<MediaObject>;
     cameraSummary: BaseStationCameraSummary;
     cameraStatus: BaseStationCameraStatus;
@@ -54,74 +54,51 @@ export class ArloCamera extends ScryptedDeviceBase implements Battery, Camera, V
 
     // implement
     async getVideoStream(options?: RequestMediaStreamOptions): Promise<MediaObject> {
-        const server = net.createServer(async (clientSocket) => {
-            // we are connected now, so remove the timeout
-            clearTimeout(serverTimeout);
-            // don't allow any new connections
-            server.close();
+        const gstreamerPort = Math.round(Math.random() * 30000 + 30000);
 
-
-            const gstreamerServer = net.createServer(gstreamerSocket => {
-                clearTimeout(gstreamerTimeout);
-                gstreamerServer.close();
-                // pipe data between the gstreamer socket and the ffmpeg socket
-                clientSocket.pipe(gstreamerSocket).pipe(clientSocket);
-            });
-
-            // set up the timeout for client connection for gstreamer server
-            const gstreamerTimeout = setTimeout(() => {
-                this.console.log('timed out waiting for gstreamer');
-                gstreamerServer.close();
-            }, 30000);
-
-            // start up the listen port for the gstreamer server
-            const gstreamerPort = await listenZero(gstreamerServer);
-
-            // start up the gstreamer server on an available port and start listening
-            // TODO: add override const args = gStreamerInput.split(' ');
-            const args: string[] = [];
-            // build the gstreamer command
-            args.push(
+        // build the gstreamer command
+        let gstArgs: string[] = [];
+        if (this.getGStreamerInput) {
+            gstArgs = this.getGStreamerInput().split(' ');
+        } else {
+            gstArgs.push(
                 // set up the RTSP source from the camera
                 'rtspsrc', `location=rtsp://${this.cameraSummary.ip}/live`, 'name=arlo',
                 // parse the h264 video stream and push it to our sink
                 'arlo.', '!', 'rtph264depay', '!', 'h264parse', '!', 'queue', '!', 'mux.');
             if (!this.isAudioDisabled()) {
                 // parse the aac audio stream and push it to our sink
-                args.push('arlo.', '!', 'rtpmp4gdepay', '!', 'aacparse', '!', 'queue', '!', 'mux.');
+                gstArgs.push('arlo.', '!', 'rtpmp4gdepay', '!', 'aacparse', '!', 'queue', '!', 'mux.');
             }
             // configure our mux to mpegts and TCP sink to FFMPEG
-            args.push('mpegtsmux', 'name=mux', '!', 'tcpclientsink', `port=${gstreamerPort}`);
+            gstArgs.push('mpegtsmux', 'name=mux', '!', 'tcpserversink', 'host=127.0.0.1', `port=${gstreamerPort}`);
+        }
 
-            // launch the command to start the stream
-            this.console.info('Starting GStreamer pipeline; command: gst-launch-1.0 ' + args.join(' '));
-            const cp = child_process.spawn('gst-launch-1.0', args);
-            cp.stdout.on('data', data => this.console.log(data.toString()));
-            cp.stderr.on('data', data => this.console.log(data.toString()));
+        // launch the command to start the stream
+        this.console.info('Starting GStreamer pipeline; command: gst-launch-1.0 ' + gstArgs.join(' '));
+        const cp = child_process.spawn('gst-launch-1.0', gstArgs);
+        cp.stdout.on('data', data => this.console.log(data.toString()));
+        cp.stderr.on('data', data => this.console.log(data.toString()));
 
-            clientSocket.on('close', () => cp.kill());
-        });
-
-        // set up the timeout for client connection for client connection
-        const serverTimeout = setTimeout(() => {
-            this.console.log('timed out waiting for client');
-            server.close();
-        }, 30000);
-
-        // start up the server on an available port and start listening
-        const port = await listenZero(server);
-
-        // return the ffmpeg input that should contain the output of the gstreamer pipeline
-        const ret: FFmpegInput = {
-            url: undefined,
-            inputArguments: [
+        // build the ffmpeg command
+        let ffmpegArgs: string[] = [];
+        if (this.getFfmpegInput) {
+            ffmpegArgs = this.getFfmpegInput().split(' ');
+        } else {
+            ffmpegArgs = [
                 '-loglevel',
                 'trace',
                 '-f',
                 'mpegts',
                 '-i',
-                `tcp://127.0.0.1:${port}`
-            ],
+                `tcp://127.0.0.1:${gstreamerPort}`
+            ];
+        }
+
+        // return the ffmpeg input that should contain the output of the gstreamer pipeline
+        const ret: FFmpegInput = {
+            url: undefined,
+            inputArguments: ffmpegArgs,
             mediaStreamOptions: { id: options.id ?? 'channel0', ...options },
         };
 
@@ -139,6 +116,13 @@ export class ArloCamera extends ScryptedDeviceBase implements Battery, Camera, V
                 description: 'Optional override of GStreamer input arguments passed to the command line gst-launch-1.0 tool.',
                 placeholder: 'rtspsrc location=rtsp://192.168.1.100/live ...',
                 value: this.getGStreamerInput(),
+            },
+            {
+                key: 'ffmpegInput',
+                title: 'FFmpeg Input Stream Override',
+                description: 'Optional override of FFmpeg input arguments passed to the media manager.',
+                placeholder: '-f mpegts -i udp://127.0.0.1:54321',
+                value: this.getFfmpegInput(),
             },
             {
                 key: 'noAudio',
@@ -161,6 +145,14 @@ export class ArloCamera extends ScryptedDeviceBase implements Battery, Camera, V
 
     async putGStreamerInput(gStreamerInput: string) {
         this.storage.setItem('gStreamerInput', gStreamerInput);
+    }
+
+    getFfmpegInput(): string {
+        return this.storage.getItem('ffmpegInput');
+    }
+
+    async putFfmpegInput(ffmpegInput: string) {
+        this.storage.setItem('ffmpegInput', ffmpegInput);
     }
 
     isAudioDisabled() {
