@@ -1,18 +1,17 @@
-import { AudioSensor, Battery, Camera, FFmpegInput, MediaObject, MediaStreamOptions, MotionSensor, PictureOptions, ResponseMediaStreamOptions, ScryptedDeviceBase, ScryptedMimeTypes, VideoCamera } from '@scrypted/sdk';
+import { Battery, Camera, FFmpegInput, MediaObject, PictureOptions, RequestMediaStreamOptions, ResponseMediaStreamOptions, ScryptedDeviceBase, ScryptedInterface, Setting, Settings, SettingValue, VideoCamera } from '@scrypted/sdk';
 import sdk from '@scrypted/sdk';
-import path from 'path';
 import { ArloCameraPlugin } from './main';
-import fs from 'fs';
-import {BaseStationCameraSummary, BaseStationCameraStatus} from './base-station-api-client';
+import net from 'net';
+import child_process from "child_process";
+import { BaseStationCameraSummary, BaseStationCameraStatus } from './base-station-api-client';
+import { listenZero } from '@scrypted/common/src/listen-cluster'
+const { mediaManager } = sdk;
 
-const { log, deviceManager, mediaManager } = sdk;
-
-// use the dog.jpg from the fs directory that will be packaged with the plugin
-const dogImage = fs.readFileSync('dog.jpg');
-
-export class ArloCamera extends ScryptedDeviceBase implements AudioSensor, Battery, Camera, VideoCamera, MotionSensor {
+export class ArloCamera extends ScryptedDeviceBase implements Battery, Camera, VideoCamera, Settings {
+    pendingPicture: Promise<MediaObject>;
     cameraSummary: BaseStationCameraSummary;
     cameraStatus: BaseStationCameraStatus;
+    sdp: Promise<string>;
 
     constructor(public plugin: ArloCameraPlugin, nativeId: string, cameraSummary: BaseStationCameraSummary, cameraStatus: BaseStationCameraStatus) {
         super(nativeId);
@@ -20,60 +19,151 @@ export class ArloCamera extends ScryptedDeviceBase implements AudioSensor, Batte
         this.cameraStatus = cameraStatus;
     }
 
-    async takePicture(options?: PictureOptions): Promise<MediaObject> {
-        return mediaManager.createMediaObject(dogImage, 'image/jpeg');
-    }
+    /** Camera */
 
-    async getPictureOptions(): Promise<PictureOptions[]> {
-        // can optionally provide the different resolutions of images that are available.
-        // used by homekit, if available.
+    // implement
+    async takePicture(option?: PictureOptions): Promise<MediaObject> {
         return;
     }
 
-    async getVideoStream(options?: MediaStreamOptions): Promise<MediaObject> {
-        let ffmpegInput: FFmpegInput;
-
-        const file = path.join(process.env.SCRYPTED_PLUGIN_VOLUME, 'zip', 'unzipped', 'fs', 'dog.mp4');
-
-        ffmpegInput = {
-            // the input doesn't HAVE to be an url, but if it is, provide this hint.
-            url: undefined,
-            inputArguments: [
-                '-re',
-                '-stream_loop', '-1',
-                '-i', file,
-            ]
-        };
-
-        return mediaManager.createMediaObject(Buffer.from(JSON.stringify(ffmpegInput)), ScryptedMimeTypes.FFmpegInput);
+    // implement
+    async getPictureOptions(): Promise<PictureOptions[]> {
+        return;
     }
 
+    async takePictureThrottled(option?: PictureOptions): Promise<MediaObject> {
+        // TODO: implement this
+        return;
+    }
+
+    /** VideoCamera */
+
+    // implement
     async getVideoStreamOptions(): Promise<ResponseMediaStreamOptions[]> {
         return [{
-            id: 'stream',
-            audio: null,
+            id: 'channel0',
+            name: 'Stream 1',
             video: {
-                codec: 'h264',
-            }
+                codec: 'h264'
+            },
+            audio: this.isAudioDisabled() ? null : {
+                codec: 'aac'
+            },
         }];
     }
 
+    // implement
+    async getVideoStream(options?: RequestMediaStreamOptions): Promise<MediaObject> {
+        const server = net.createServer(async (clientSocket) => {
+            // we are connected now, so remove the timeout
+            clearTimeout(serverTimeout);
+            // don't allow any new connections
+            server.close();
 
-    async startIntercom(media: MediaObject): Promise<void> {
-        const ffmpegInput: FFmpegInput = JSON.parse((await mediaManager.convertMediaObjectToBuffer(media, ScryptedMimeTypes.FFmpegInput)).toString());
-        // something wants to start playback on the camera speaker.
-        // use their ffmpeg input arguments to spawn ffmpeg to do playback.
-        // some implementations read the data from an ffmpeg pipe output and POST to a url (like unifi/amcrest).
-        throw new Error('not implemented');
+
+            const gstreamerServer = net.createServer(gstreamerSocket => {
+                clearTimeout(gstreamerTimeout);
+                gstreamerServer.close();
+                // pipe data between the gstreamer socket and the ffmpeg socket
+                clientSocket.pipe(gstreamerSocket).pipe(clientSocket);
+            });
+
+            // set up the timeout for client connection for gstreamer server
+            const gstreamerTimeout = setTimeout(() => {
+                this.console.log('timed out waiting for gstreamer');
+                gstreamerServer.close();
+            }, 30000);
+
+            // start up the listen port for the gstreamer server
+            const gstreamerPort = await listenZero(gstreamerServer);
+
+            // start up the gstreamer server on an available port and start listening
+            // TODO: add override const args = gStreamerInput.split(' ');
+            const args: string[] = [];
+            // build the gstreamer command
+            args.push(
+                // set up the RTSP source from the camera
+                'rtspsrc', `location=rtsp://${this.cameraSummary.ip}/live`, 'name=arlo',
+                // parse the h264 video stream and push it to our sink
+                'arlo.', '!', 'rtph264depay', '!', 'h264parse', '!', 'queue', '!', 'mux.');
+            if (!this.isAudioDisabled()) {
+                // parse the aac audio stream and push it to our sink
+                args.push('arlo.', '!', 'rtpmp4gdepay', '!', 'aacparse', '!', 'queue', '!', 'mux.');
+            }
+            // configure our mux to mpegts and TCP sink to FFMPEG
+            args.push('mpegtsmux', 'name=mux', '!', 'tcpclientsink', `port=${gstreamerPort}`);
+
+            // launch the command to start the stream
+            this.console.info('Starting GStreamer pipeline; command: gst-launch-1.0 ' + args.join(' '));
+            const cp = child_process.spawn('gst-launch-1.0', args);
+            cp.stdout.on('data', data => this.console.log(data.toString()));
+            cp.stderr.on('data', data => this.console.log(data.toString()));
+
+            clientSocket.on('close', () => cp.kill());
+        });
+
+        // set up the timeout for client connection for client connection
+        const serverTimeout = setTimeout(() => {
+            this.console.log('timed out waiting for client');
+            server.close();
+        }, 30000);
+
+        // start up the server on an available port and start listening
+        const port = await listenZero(server);
+
+        // return the ffmpeg input that should contain the output of the gstreamer pipeline
+        const ret: FFmpegInput = {
+            url: undefined,
+            inputArguments: [
+                '-loglevel',
+                'trace',
+                '-f',
+                'mpegts',
+                '-i',
+                `tcp://127.0.0.1:${port}`
+            ],
+            mediaStreamOptions: { id: options.id ?? 'channel0', ...options },
+        };
+
+        return mediaManager.createFFmpegMediaObject(ret);
     }
 
-    async stopIntercom(): Promise<void> {
+    /** Settings */
+
+    // implement
+    async getSettings(): Promise<Setting[]> {
+        return [
+            {
+                key: 'gStreamerInput',
+                title: 'GStreamer Input Stream Override',
+                description: 'Optional override of GStreamer input arguments passed to the command line gst-launch-1.0 tool.',
+                placeholder: 'rtspsrc location=rtsp://192.168.1.100/live ...',
+                value: this.getGStreamerInput(),
+            },
+            {
+                key: 'noAudio',
+                title: 'No Audio',
+                description: 'Enable this setting if the camera does not have audio or to mute audio.',
+                type: 'boolean',
+                value: (this.isAudioDisabled()).toString(),
+            },
+        ];
     }
 
-    // most cameras have have motion and doorbell press events, but dont notify when the event ends.
-    // so set a timeout ourselves to reset the state.
-    triggerMotion() {
-        this.motionDetected = true;
-        setTimeout(() => this.motionDetected = false, 10000);
+    // implement
+    async putSetting(key: string, value: SettingValue) {
+        this.storage.setItem(key, value.toString());
+    }
+
+    getGStreamerInput(): string {
+        return this.storage.getItem('gStreamerInput');
+    }
+
+    async putGStreamerInput(gStreamerInput: string) {
+        this.storage.setItem('gStreamerInput', gStreamerInput);
+    }
+
+    isAudioDisabled() {
+        return this.storage.getItem('noAudio') === 'true' || this.cameraStatus.UpdateSystemModelNumber === 'VMC3030';
     }
 }
