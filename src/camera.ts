@@ -1,10 +1,8 @@
-import { Battery, Camera, FFmpegInput, MediaObject, PictureOptions, RequestMediaStreamOptions, ResponseMediaStreamOptions, ScryptedDeviceBase, ScryptedInterface, Setting, Settings, SettingValue, VideoCamera } from '@scrypted/sdk';
+import { Camera, FFmpegInput, MediaObject, PictureOptions, RequestMediaStreamOptions, ResponseMediaStreamOptions, ScryptedDeviceBase, Setting, Settings, SettingValue, VideoCamera } from '@scrypted/sdk';
 import sdk from '@scrypted/sdk';
 import { ArloCameraPlugin } from './main';
-import net from 'net';
 import child_process from "child_process";
 import { BaseStationCameraSummary, BaseStationCameraStatus } from './base-station-api-client';
-import { listenZero } from '@scrypted/common/src/listen-cluster'
 const { mediaManager } = sdk;
 
 export class ArloCamera extends ScryptedDeviceBase implements Camera, VideoCamera, Settings {
@@ -47,7 +45,7 @@ export class ArloCamera extends ScryptedDeviceBase implements Camera, VideoCamer
                 codec: 'h264'
             },
             audio: this.isAudioDisabled() ? null : {
-                codec: 'aac'
+                codec: 'opus'
             },
         }];
     }
@@ -58,41 +56,34 @@ export class ArloCamera extends ScryptedDeviceBase implements Camera, VideoCamer
 
         // build the gstreamer command
         let gstArgs: string[] = [];
-        if (this.getGStreamerInput) {
+        if (this.getGStreamerInput()) {
             gstArgs = this.getGStreamerInput().split(' ');
         } else {
             gstArgs.push(
                 // set up the RTSP source from the camera
-                'rtspsrc', `location=rtsp://${this.cameraSummary.ip}/live`, 'name=arlo',
+                'rtspsrc', `location=rtsp://${this.cameraSummary.ip}/live`, 'name=arlo', 'latency=200',
                 // parse the h264 video stream and push it to our sink
-                'arlo.', '!', 'rtph264depay', '!', 'h264parse', '!', 'queue', '!', 'mux.');
+                'arlo.', '!', 'rtph264depay', '!', 'queue', '!', 'mux.');
             if (!this.isAudioDisabled()) {
-                // parse the aac audio stream and push it to our sink
-                gstArgs.push('arlo.', '!', 'rtpmp4gdepay', '!', 'aacparse', '!', 'queue', '!', 'mux.');
+                // parse the opus audio stream and push it to our sink
+                gstArgs.push('arlo.', '!', 'rtpopusdepay', '!', 'queue', '!', 'mux.');
             }
             // configure our mux to mpegts and TCP sink to FFMPEG
-            gstArgs.push('mpegtsmux', 'name=mux', '!', 'tcpserversink', 'host=127.0.0.1', `port=${gstreamerPort}`);
+            gstArgs.push('mpegtsmux', 'name=mux', '!', 'tcpserversink', 'host=127.0.0.1', `port=${gstreamerPort}`, 'timeout=30000000000'/*ns*/);
         }
 
         // launch the command to start the stream
         this.console.info('Starting GStreamer pipeline; command: gst-launch-1.0 ' + gstArgs.join(' '));
-        const cp = child_process.spawn('gst-launch-1.0', gstArgs);
+        const cp = child_process.spawn('gst-launch-1.0', gstArgs, { env: { GST_DEBUG: '1' } });
         cp.stdout.on('data', data => this.console.log(data.toString()));
         cp.stderr.on('data', data => this.console.log(data.toString()));
 
         // build the ffmpeg command
         let ffmpegArgs: string[] = [];
-        if (this.getFfmpegInput) {
+        if (this.getFfmpegInput()) {
             ffmpegArgs = this.getFfmpegInput().split(' ');
         } else {
-            ffmpegArgs = [
-                '-loglevel',
-                'trace',
-                '-f',
-                'mpegts',
-                '-i',
-                `tcp://127.0.0.1:${gstreamerPort}`
-            ];
+            ffmpegArgs = ['-timeout', '3000000', '-f', 'mpegts', '-i', `tcp://127.0.0.1:${gstreamerPort}`];
         }
 
         // return the ffmpeg input that should contain the output of the gstreamer pipeline
