@@ -94,6 +94,8 @@ listenServerPort('SCRYPTED_DEBUG_PORT', SCRYPTED_DEBUG_PORT, debugServer);
 
 const app = express();
 
+app.set('trust proxy', 'loopback');
+
 // parse application/x-www-form-urlencoded
 app.use(bodyParser.urlencoded({ extended: false }) as any)
 
@@ -202,9 +204,10 @@ async function start() {
 
                 if (checkHash === sha) {
                     const userToken = validateToken(tokenPart);
-                    if (userToken)
+                    if (userToken) {
                         res.locals.username = userToken.username;
-                    res.locals.aclId = userToken.aclId;
+                        res.locals.aclId = userToken.aclId;
+                    }
                 }
             }
         }
@@ -404,7 +407,7 @@ async function start() {
     });
 
     const getLoginUserToken = (req: express.Request) => {
-        return req.secure || ip.isLoopback(req.socket?.remoteAddress) ? 'login_user_token' : 'login_user_token_insecure';
+        return req.secure ? 'login_user_token' : 'login_user_token_insecure';
     };
 
     const validateToken = (token: string) => {

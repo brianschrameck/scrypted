@@ -7,9 +7,6 @@
 [submodule "plugins/myq/src/myq"]
 	path = plugins/myq/src/myq
 	url = ../../koush/myq.git
-[submodule "plugins/neato/node-botvac"]
-	path = plugins/neato/node-botvac
-	url = ../../koush/node-botvac
 [submodule "plugins/tensorflow/face-api.js"]
 	path = external/face-api.js
 	url = ../../koush/face-api.js
@@ -31,9 +28,6 @@
 [submodule "plugins/zwave/file-stream-rotator"]
 	path = plugins/zwave/file-stream-rotator
 	url = ../../koush/file-stream-rotator.git
-[submodule "plugins/roborock/homebridge-xiaomi-roborock-vacuum"]
-	path = plugins/roborock/homebridge-xiaomi-roborock-vacuum
-	url = https://github.com/homebridge-xiaomi-roborock-vacuum/homebridge-xiaomi-roborock-vacuum.git
 [submodule "external/push-receiver"]
 	path = external/push-receiver
 	url = ../../koush/push-receiver.git
