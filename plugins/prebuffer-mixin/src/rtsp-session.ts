@@ -127,13 +127,12 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                 const transport = setupResult.headers['transport'];
                 const match = transport.match(/.*?server_port=([0-9]+)-([0-9]+)/);
                 const [_, rtp, rtcp] = match;
-                if (rtp === '0') {
-                    console.warn(`Received server_port 0 for codec: ${codec}; skipping punch.`);
-                } else {
+                const rtpPort = parseInt(rtp);
+                // have seen some servers return a server_port 0. should watch for bad data in any case.
+                if (rtpPort) {
                     const { hostname } = new URL(rtspClient.url);
-                    udp.send(punch, parseInt(rtp), hostname);
+                    udp.send(punch, rtpPort, hostname)
                 }
-
                 mapping[channel] = codec;
             }
             else {
