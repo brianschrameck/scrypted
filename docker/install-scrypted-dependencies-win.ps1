@@ -1,4 +1,4 @@
-Set-PSDebug -Trace 1
+# Set-PSDebug -Trace 1
 
 # stop existing service if any
 sc.exe stop scrypted.exe
@@ -12,12 +12,15 @@ choco upgrade -y nodejs-lts --version=18.14.0
 
 # Install Python
 choco upgrade -y python39
+# Run py.exe with a specific version
+$SCRYPTED_WINDOWS_PYTHON_VERSION="-3.9"
 
 # Refresh environment variables for py and npx to work
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User") 
 
-py -m pip install --upgrade pip
-py -m pip install aiofiles debugpy typing_extensions typing opencv-python
+
+py $SCRYPTED_WINDOWS_PYTHON_VERSION -m pip install --upgrade pip
+py $SCRYPTED_WINDOWS_PYTHON_VERSION -m pip install aiofiles debugpy typing_extensions typing opencv-python
 
 npx -y scrypted@latest install-server
 
@@ -25,6 +28,9 @@ $USER_HOME_ESCAPED = $env:USERPROFILE.replace('\', '\\')
 $SCRYPTED_HOME = $env:USERPROFILE + '\.scrypted'
 $SCRYPTED_HOME_ESCAPED_PATH = $SCRYPTED_HOME.replace('\', '\\')
 npm install --prefix $SCRYPTED_HOME node-windows@1.0.0-beta.8 --save
+
+$NPX_PATH = (Get-Command npx).Path
+$NPX_PATH_ESCAPED = $NPX_PATH.replace('\', '\\')
 
 $SERVICE_JS = @"
 const fs = require('fs');
@@ -34,7 +40,7 @@ try {
 catch (e) {
 }
 const child_process = require('child_process');
-child_process.spawn('npx.cmd', ['-y', 'scrypted', 'serve'], {
+child_process.spawn('$($NPX_PATH_ESCAPED)', ['-y', 'scrypted', 'serve'], {
     stdio: 'inherit',
 });
 "@
@@ -42,9 +48,6 @@ child_process.spawn('npx.cmd', ['-y', 'scrypted', 'serve'], {
 $SERVICE_JS_PATH = $SCRYPTED_HOME + '\service.js'
 $SERVICE_JS_ESCAPED_PATH = $SERVICE_JS_PATH.replace('\', '\\')
 $SERVICE_JS | Out-File -Encoding ASCII -FilePath $SERVICE_JS_PATH
-
-Write-Output "Scrypted service will run as user $($env:USERNAME). Password is required for service setup."
-$env:PASSWORD = Read-Host -Prompt "Enter password for $($env:USERNAME)"
 
 $INSTALL_SERVICE_JS = @"
 const Service = require('node-windows').Service;
@@ -57,11 +60,12 @@ const svc = new Service({
       name: "USERPROFILE",
       value: '$($USER_HOME_ESCAPED)'
     },
+    {
+      name: "SCRYPTED_WINDOWS_PYTHON_VERSION",
+      value: '$($SCRYPTED_WINDOWS_PYTHON_VERSION)'
+    }
   ]
 });
-svc.logOnAs.domain = '$($env:COMPUTERNAME)';
-svc.logOnAs.account = '$($env:USERNAME)';
-svc.logOnAs.password = '$($env:PASSWORD)';
 svc.on('alreadyinstalled', () => {
    console.log('Service already installed, uninstalling first');
    // wait 5 seconds after uninstalling before deleting daemon to prevent unlink error
