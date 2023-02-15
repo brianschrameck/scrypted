@@ -660,7 +660,6 @@ class AudioSensor:
 
 class Battery:
     batteryLevel: float
-    externallyPowered: bool
     pass
 
 class BinarySensor:
@@ -1267,7 +1266,6 @@ class ScryptedInterfaceProperty(Enum):
     lockState = "lockState"
     entryOpen = "entryOpen"
     batteryLevel = "batteryLevel"
-    externallyPowered = "externallyPowered"
     online = "online"
     fromMimeType = "fromMimeType"
     toMimeType = "toMimeType"
@@ -1543,13 +1541,6 @@ class DeviceState:
     @batteryLevel.setter
     def batteryLevel(self, value: float):
         self.setScryptedProperty("batteryLevel", value)
-
-    @property
-    def externallyPowered(self) -> bool:
-        return self.getScryptedProperty("externallyPowered")
-    @externallyPowered.setter
-    def externallyPowered(self, value: bool):
-        self.setScryptedProperty("externallyPowered", value)
 
     @property
     def online(self) -> bool:
@@ -2025,8 +2016,7 @@ ScryptedInterfaceDescriptors = {
     "name": "Battery",
     "methods": [],
     "properties": [
-      "batteryLevel",
-      "externallyPowered"
+      "batteryLevel"
     ]
   },
   "Refresh": {
