@@ -312,6 +312,7 @@ export interface RtspClientSetupOptions {
     type: 'tcp' | 'udp';
     path?: string;
     onRtp: (rtspHeader: Buffer, rtp: Buffer) => void;
+    onRtcp?: (rtspHeader: Buffer, rtp: Buffer) => void;
 }
 
 export interface RtspClientTcpSetupOptions extends RtspClientSetupOptions {
@@ -322,6 +323,7 @@ export interface RtspClientTcpSetupOptions extends RtspClientSetupOptions {
 export interface RtspClientUdpSetupOptions extends RtspClientSetupOptions {
     type: 'udp';
     dgram?: dgram.Socket;
+    rtcpDgram?: dgram.Socket;
 }
 
 // probably only works with scrypted rtsp server.
@@ -334,6 +336,7 @@ export class RtspClient extends RtspBase {
     setupOptions = new Map<number, RtspClientTcpSetupOptions>();
     issuedTeardown = false;
     hasGetParameter = true;
+    enableRtcpReceiverReports = false;
 
     constructor(public url: string) {
         super();
@@ -664,6 +667,7 @@ export class RtspClient extends RtspBase {
         const protocol = options.type === 'udp' ? '' : '/TCP';
         const client = options.type === 'udp' ? 'client_port' : 'interleaved';
         let port: number;
+        let rtcpPort: number;
         if (options.type === 'tcp') {
             port = options.port;
         }
@@ -712,6 +716,17 @@ export class RtspClient extends RtspBase {
         }
         if (options.type === 'tcp')
             this.setupOptions.set(interleaved ? interleaved.begin : port, options);
+        else {
+            // set up RTCP after receiving the response so we can check to ensure server_port is specified
+            if (!options.rtcpDgram && this.enableRtcpReceiverReports) {
+                const rtcpUdp = await createBindUdp(port + 1);
+                options.rtcpDgram = rtcpUdp.server;
+                this.client.on('close', () => closeQuiet(rtcpUdp.server));
+            }
+            rtcpPort = options.rtcpDgram?.address().port;
+            options.rtcpDgram?.on('message', data => options.onRtcp(undefined, data));
+        }
+
         return Object.assign({ interleaved, options }, response);
     }
 

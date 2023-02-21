@@ -118,6 +118,18 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                         events.emit('rtsp', chunk);
                         resetActivityTimer?.();
                     },
+                    onRtcp: (header, data) => {
+                        const prefix = Buffer.alloc(4);
+                        prefix.writeUInt8(RTSP_FRAME_MAGIC, 0);
+                        prefix.writeUInt8(rtspChannel, 1);
+                        prefix.writeUInt16BE(data.length, 2);
+                        const chunk: StreamChunk = {
+                            chunks: [prefix, data],
+                            type: codec,
+                        };
+                        events.emit('rtsp', chunk);
+                        resetActivityTimer?.();
+                    },
                 };
                 const setupResult = await rtspClient.setup(setup);
                 udp = setup.dgram;
@@ -132,6 +144,12 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                 if (rtpPort) {
                     const { hostname } = new URL(rtspClient.url);
                     udp.send(punch, rtpPort, hostname)
+                }
+                const rtcpPort = parseInt(rtcp);
+                // have seen some servers return a server_port 0. should watch for bad data in any case.
+                if (rtcpPort && setup.rtcpDgram) {
+                    const { hostname } = new URL(rtspClient.url);
+                    setup.rtcpDgram.send(punch, rtcpPort, hostname)
                 }
                 mapping[channel] = codec;
             }
