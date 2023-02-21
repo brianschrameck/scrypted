@@ -9,7 +9,8 @@ export interface RtpPacket {
         timestamp: number;
         sequenceNumber: number;
     };
-    clone(): typeof this;
+    clone(): RtpPacket;
+    serialize(): Buffer;
 }
 
 export function sequenceNumberDistance(s1: number, s2: number): number {

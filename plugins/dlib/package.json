@@ -33,6 +33,7 @@
       "runtime": "python",
       "type": "API",
       "interfaces": [
+         "Camera",
          "Settings",
          "BufferConverter",
          "ObjectDetection"
