@@ -1,14 +1,13 @@
-import sdk, { DeviceManifest, DeviceProvider, HttpRequest, HttpRequestHandler, HttpResponse, HumiditySensor, MediaObject, MotionSensor, OauthClient, Refresh, ScryptedDeviceType, ScryptedInterface, Setting, Settings, TemperatureSetting, TemperatureUnit, Thermometer, ThermostatMode, VideoCamera, MediaStreamOptions, BinarySensor, DeviceInformation, RTCAVSignalingSetup, Camera, PictureOptions, ObjectsDetected, ObjectDetector, ObjectDetectionTypes, FFmpegInput, RequestMediaStreamOptions, Readme, RTCSignalingChannel, RTCSessionControl, RTCSignalingSession, ResponseMediaStreamOptions, RTCSignalingOptions, RTCSignalingSendIceCandidate, ScryptedMimeTypes, MediaStreamUrl } from '@scrypted/sdk';
-import { ScryptedDeviceBase } from '@scrypted/sdk';
-import qs from 'query-string';
-import ClientOAuth2 from 'client-oauth2';
-import { URL } from 'url';
-import axios from 'axios';
-import throttle from 'lodash/throttle';
 import { connectRTCSignalingClients } from '@scrypted/common/src/rtc-signaling';
 import { sleep } from '@scrypted/common/src/sleep';
-import fs from 'fs';
+import sdk, { BinarySensor, Camera, DeviceInformation, DeviceManifest, DeviceProvider, FFmpegInput, HttpRequest, HttpRequestHandler, HttpResponse, HumiditySensor, MediaObject, MediaStreamUrl, MotionSensor, OauthClient, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, PictureOptions, Readme, Refresh, RequestMediaStreamOptions, ResponseMediaStreamOptions, RTCAVSignalingSetup, RTCSessionControl, RTCSignalingChannel, RTCSignalingSendIceCandidate, RTCSignalingSession, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, TemperatureCommand, TemperatureSetting, TemperatureUnit, Thermometer, ThermostatMode, VideoCamera } from '@scrypted/sdk';
+import axios from 'axios';
+import ClientOAuth2 from 'client-oauth2';
 import { randomBytes } from 'crypto';
+import fs from 'fs';
+import throttle from 'lodash/throttle';
+import qs from 'query-string';
+import { URL } from 'url';
 
 const { deviceManager, mediaManager, endpointManager, systemManager } = sdk;
 
@@ -99,6 +98,10 @@ class NestRTCSessionControl implements RTCSessionControl {
     refreshAt = Date.now() + 4 * 60 * 1000;
 
     constructor(public camera: NestCamera, public options: { streamExtensionToken: string, mediaSessionId: string }) {
+    }
+
+    async setPlayback(options: { audio: boolean; video: boolean; }): Promise<void> {
+
     }
 
     async getRefreshAt(): Promise<number> {
@@ -372,6 +375,52 @@ class NestThermostat extends ScryptedDeviceBase implements HumiditySensor, Therm
         this.reload();
     }
 
+    async setTemperature(command: TemperatureCommand): Promise<void> {
+        // set this in case round trip is slow.
+        let { mode, setpoint } = command;
+        if (mode) {
+            const nestMode = toNestMode(mode);
+            this.device.traits['sdm.devices.traits.ThermostatMode'].mode = nestMode;
+
+            this.executeCommandSetMode = {
+                command: 'sdm.devices.commands.ThermostatMode.SetMode',
+                params: {
+                    mode: nestMode,
+                },
+            }
+        }
+
+        if (command.setpoint) {
+            mode ||= fromNestMode(this.device.traits['sdm.devices.traits.ThermostatMode'].mode);
+
+            this.executeCommandSetCelsius = {
+                command: setpointReverseMap.get(mode),
+                params: {
+                },
+            };
+
+            if (typeof command.setpoint === 'number') {
+                if (mode === ThermostatMode.Heat) {
+                    this.executeCommandSetCelsius.params.heatCelsius = command.setpoint;
+
+                }
+                else if (mode === ThermostatMode.Cool) {
+                    this.executeCommandSetCelsius.params.coolCelsius = command.setpoint;
+                }
+                else {
+                    this.executeCommandSetCelsius.params.coolCelsius = command.setpoint;
+                    this.executeCommandSetCelsius.params.heatCelsius = command.setpoint;
+                }
+            }
+            else {
+                this.executeCommandSetCelsius.params.heatCelsius = command[0];
+                this.executeCommandSetCelsius.params.coolCelsius = command[1];
+            }
+        }
+        await this.executeThrottle();
+        await this.refresh(null, true);
+    }
+
     async setTemperatureUnit(temperatureUnit: TemperatureUnit): Promise<void> {
         // not supported by API. throw?
     }
@@ -398,25 +447,36 @@ class NestThermostat extends ScryptedDeviceBase implements HumiditySensor, Therm
         const heat = device.traits?.['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
         const cool = device.traits?.['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
 
+        let setpoint: number | [number, number];
         if (this.thermostatMode === ThermostatMode.Heat) {
             this.thermostatSetpoint = heat;
             this.thermostatSetpointHigh = undefined;
             this.thermostatSetpointLow = undefined;
+            setpoint = heat;
         }
         else if (this.thermostatMode === ThermostatMode.Cool) {
             this.thermostatSetpoint = cool;
             this.thermostatSetpointHigh = undefined;
             this.thermostatSetpointLow = undefined;
+            setpoint = cool;
         }
         else if (this.thermostatMode === ThermostatMode.HeatCool) {
             this.thermostatSetpoint = undefined;
             this.thermostatSetpointHigh = heat;
             this.thermostatSetpointLow = cool;
+            setpoint = [heat, cool];
         }
         else {
             this.thermostatSetpoint = undefined;
             this.thermostatSetpointHigh = undefined;
             this.thermostatSetpointLow = undefined;
+        }
+
+        this.temperatureSetting = {
+            activeMode: this.thermostatActiveMode,
+            mode: this.thermostatMode,
+            setpoint,
+            availableModes: modes,
         }
     }
 
@@ -559,6 +619,8 @@ export class GoogleSmartDeviceAccess extends ScryptedDeviceBase implements Oauth
                 }
             }
         })();
+    }
+    async releaseDevice(id: string, nativeId: string): Promise<void> {
     }
 
     async onRequest(request: HttpRequest, response: HttpResponse): Promise<void> {

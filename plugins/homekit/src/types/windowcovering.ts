@@ -5,31 +5,37 @@ import { makeAccessory } from './common';
 import type { HomeKitPlugin } from "../main";
 
 addSupportedType({
-    type: ScryptedDeviceType.Garage,
+    type: ScryptedDeviceType.WindowCovering,
     probe(device: DummyDevice): boolean {
         return device.interfaces.includes(ScryptedInterface.Entry) && device.interfaces.includes(ScryptedInterface.EntrySensor);
     },
     getAccessory: async (device: ScryptedDevice & Entry & EntrySensor, homekitPlugin: HomeKitPlugin) => {
         const accessory = makeAccessory(device, homekitPlugin);
 
-        const service = accessory.addService(Service.GarageDoorOpener, device.name);
+        const service = accessory.addService(Service.WindowCovering, device.name);
 
-        bindCharacteristic(device, ScryptedInterface.EntrySensor, service, Characteristic.CurrentDoorState,
-            () => !!device.entryOpen ? Characteristic.CurrentDoorState.OPEN : Characteristic.CurrentDoorState.CLOSED);
+        bindCharacteristic(device, ScryptedInterface.EntrySensor, service, Characteristic.CurrentPosition,
+            () => !!device.entryOpen ? 100 : 0);
 
-        bindCharacteristic(device, ScryptedInterface.EntrySensor, service, Characteristic.TargetDoorState,
-            () => !!device.entryOpen ? Characteristic.TargetDoorState.OPEN : Characteristic.TargetDoorState.CLOSED);
+        bindCharacteristic(device, ScryptedInterface.EntrySensor, service, Characteristic.TargetPosition,
+            () => !!device.entryOpen ? 100 : 0);
 
-        let targetState = !!device.entryOpen ? Characteristic.TargetDoorState.OPEN : Characteristic.TargetDoorState.CLOSED;
-        service.getCharacteristic(Characteristic.TargetDoorState)
+        let props = {
+            minValue: 0,
+            maxValue: 100,
+            minStep: 100,
+        };
+        let targetState = !!device.entryOpen ? 100 : 0;
+        service.getCharacteristic(Characteristic.TargetPosition)
+            .setProps(props)
             .on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
                 callback();
-                if (value === Characteristic.TargetDoorState.OPEN) {
-                    targetState = Characteristic.TargetDoorState.OPEN;
+                if (value === 100) {
+                    targetState = 100;
                     device.openEntry();
                 }
                 else {
-                    targetState = Characteristic.TargetDoorState.CLOSED;
+                    targetState = 0;
                     device.closeEntry();
                 }
             })

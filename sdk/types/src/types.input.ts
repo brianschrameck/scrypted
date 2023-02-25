@@ -127,6 +127,8 @@ export enum ScryptedDeviceType {
   Valve = "Valve",
   Person = "Person",
   SecuritySystem = "SecuritySystem",
+  WindowCovering = "WindowCovering",
+  Siren = "Siren",
   Unknown = "Unknown",
 }
 /**
@@ -429,6 +431,10 @@ export interface ResponsePictureOptions extends PictureOptions {
    * Flag that indicates that the request supports resizing to custom dimensions.
    */
   canResize?: boolean;
+  /**
+   * Flag that indicates the camera will return a stale/cached image.
+   */
+  staleDuration?: number;
 }
 export interface RequestPictureOptions extends PictureOptions {
   reason?: 'user' | 'event';
@@ -562,12 +568,13 @@ export type MediaStreamDestination = "local" | "remote" | "medium-resolution" | 
 
 export interface RequestMediaStreamOptions extends MediaStreamOptions {
   /**
-   * When retrieving media, setting disableMediaProxies=true
-   * will bypass any intermediaries (NVR, rebroadcast) and retrieve
-   * it directly from the source. This is useful in cases when
-   * peer to peer connections are possible and preferred, such as WebRTC.
+   * When retrieving media, setting route directs how the media should be
+   * retrieved and exposed. A direct route will get the stream
+   * as is from the source. This will bypass any intermediaries if possible,
+   * such as an NVR or restreamers.
+   * An external route will request that that provided route is exposed to the local network.
    */
-  directMediaStream?: boolean;
+  route?: 'external' | 'direct';
 
   /**
    * Specify the stream refresh behavior when this stream is requested.
