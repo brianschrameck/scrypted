@@ -312,7 +312,7 @@ export interface RtspClientSetupOptions {
     type: 'tcp' | 'udp';
     path?: string;
     onRtp: (rtspHeader: Buffer, rtp: Buffer) => void;
-    onRtcp?: (rtspHeader: Buffer, rtp: Buffer) => void;
+    onRtcp?: (rtcp: Buffer) => void;
 }
 
 export interface RtspClientTcpSetupOptions extends RtspClientSetupOptions {
@@ -667,7 +667,6 @@ export class RtspClient extends RtspBase {
         const protocol = options.type === 'udp' ? '' : '/TCP';
         const client = options.type === 'udp' ? 'client_port' : 'interleaved';
         let port: number;
-        let rtcpPort: number;
         if (options.type === 'tcp') {
             port = options.port;
         }
@@ -703,6 +702,7 @@ export class RtspClient extends RtspBase {
             this.session = response.headers.session.split(';')[0];
         }
         if (response.headers.transport) {
+            // tcp
             const match = response.headers.transport.match(/.*?interleaved=([0-9]+)-([0-9]+)/);
             if (match) {
                 const [_, begin, end] = match;
@@ -712,21 +712,24 @@ export class RtspClient extends RtspBase {
                         end: parseInt(end),
                     };
                 }
+            } else if (options.type === 'udp' && this.enableRtcpReceiverReports) {
+                // set up RTCP after receiving the response so we can check to ensure server_port is specified
+                const match = response.headers.transport.match(/.*?server_port=([0-9]+)-([0-9]+)/);
+                if (match) {
+                    const [_, rtp, rtcp] = match;
+                    const rtcpPort = parseInt(rtcp);
+                    // have seen some servers return a server_port 0. should watch for bad data in any case.
+                    if (rtcpPort && !options.rtcpDgram) {
+                        const rtcpUdp = await createBindUdp(port + 1);
+                        options.rtcpDgram = rtcpUdp.server;
+                        this.client.on('close', () => closeQuiet(rtcpUdp.server));
+                    }
+                    options.rtcpDgram?.on('message', async data => options.onRtcp(data));
+                }
             }
         }
         if (options.type === 'tcp')
             this.setupOptions.set(interleaved ? interleaved.begin : port, options);
-        else {
-            // set up RTCP after receiving the response so we can check to ensure server_port is specified
-            if (!options.rtcpDgram && this.enableRtcpReceiverReports) {
-                const rtcpUdp = await createBindUdp(port + 1);
-                options.rtcpDgram = rtcpUdp.server;
-                this.client.on('close', () => closeQuiet(rtcpUdp.server));
-            }
-            rtcpPort = options.rtcpDgram?.address().port;
-            options.rtcpDgram?.on('message', data => options.onRtcp(undefined, data));
-        }
-
         return Object.assign({ interleaved, options }, response);
     }
 

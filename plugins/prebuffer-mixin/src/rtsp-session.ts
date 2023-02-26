@@ -8,6 +8,7 @@ import dgram from 'dgram';
 import { parse as spsParse } from "h264-sps-parser";
 import { EventEmitter } from "stream";
 import { negotiateMediaStream } from "./rfc4571";
+import { RtcpSession } from "./rtcp-session";
 import { getSpsResolution } from "./sps-resolution";
 
 export type RtspChannelCodecMapping = { [key: number]: string };
@@ -102,11 +103,12 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
             let udp: dgram.Socket;
             if (useUdp) {
                 const rtspChannel = channel;
-
+                const rtcpSession = new RtcpSession();
                 const setup: RtspClientUdpSetupOptions = {
                     path: control,
                     type: 'udp',
                     onRtp: (header, data) => {
+                        rtcpSession.onRtp(data);
                         const prefix = Buffer.alloc(4);
                         prefix.writeUInt8(RTSP_FRAME_MAGIC, 0);
                         prefix.writeUInt8(rtspChannel, 1);
@@ -118,17 +120,10 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                         events.emit('rtsp', chunk);
                         resetActivityTimer?.();
                     },
-                    onRtcp: (header, data) => {
-                        const prefix = Buffer.alloc(4);
-                        prefix.writeUInt8(RTSP_FRAME_MAGIC, 0);
-                        prefix.writeUInt8(rtspChannel, 1);
-                        prefix.writeUInt16BE(data.length, 2);
-                        const chunk: StreamChunk = {
-                            chunks: [prefix, data],
-                            type: codec,
-                        };
-                        events.emit('rtsp', chunk);
-                        resetActivityTimer?.();
+                    onRtcp: (data) => {
+                        rtcpSession.onRtcpSr(data);
+                        const rr = rtcpSession.buildReceiverReport();
+                        events.emit('rtcpRr', rr);
                     },
                 };
                 const setupResult = await rtspClient.setup(setup);
@@ -143,13 +138,16 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                 // have seen some servers return a server_port 0. should watch for bad data in any case.
                 if (rtpPort) {
                     const { hostname } = new URL(rtspClient.url);
-                    udp.send(punch, rtpPort, hostname)
+                    udp.send(punch, rtpPort, hostname);
                 }
                 const rtcpPort = parseInt(rtcp);
                 // have seen some servers return a server_port 0. should watch for bad data in any case.
                 if (rtcpPort && setup.rtcpDgram) {
                     const { hostname } = new URL(rtspClient.url);
-                    setup.rtcpDgram.send(punch, rtcpPort, hostname)
+                    setup.rtcpDgram.send(punch, rtcpPort, hostname);
+                    events.on('rtcpRr', (rr: Buffer) => {
+                        setup.rtcpDgram.send(rr, rtcpPort, hostname);
+                    });
                 }
                 mapping[channel] = codec;
             }
