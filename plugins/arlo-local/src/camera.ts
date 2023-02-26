@@ -125,7 +125,8 @@ export class ArloCameraDevice extends ArloDeviceBase implements Camera, VideoCam
             audio: this.isAudioDisabled() ? null : {
                 codec: 'aac'
             },
-            allowBatteryPrebuffer: this.allowBatteryPrebuffer() && this.externallyPowered
+            allowBatteryPrebuffer: this.allowBatteryPrebuffer() && this.externallyPowered,
+            sendRtcpRr: true
         }];
     }
 
