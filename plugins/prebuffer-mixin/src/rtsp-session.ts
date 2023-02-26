@@ -108,7 +108,6 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                     path: control,
                     type: 'udp',
                     onRtp: (header, data) => {
-                        rtcpSession.onRtp(data);
                         const prefix = Buffer.alloc(4);
                         prefix.writeUInt8(RTSP_FRAME_MAGIC, 0);
                         prefix.writeUInt8(rtspChannel, 1);
@@ -119,6 +118,9 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                         };
                         events.emit('rtsp', chunk);
                         resetActivityTimer?.();
+                        if (mediaStreamOptions.sendRtcpRr) {
+                            rtcpSession.onRtp(data);
+                        }
                     },
                     sendRtcpRr: mediaStreamOptions.sendRtcpRr,
                     onRtcp: (data) => {
