@@ -324,6 +324,7 @@ export interface RtspClientUdpSetupOptions extends RtspClientSetupOptions {
     type: 'udp';
     dgram?: dgram.Socket;
     rtcpDgram?: dgram.Socket;
+    sendRtcpRr?: boolean;
 }
 
 // probably only works with scrypted rtsp server.
@@ -336,7 +337,6 @@ export class RtspClient extends RtspBase {
     setupOptions = new Map<number, RtspClientTcpSetupOptions>();
     issuedTeardown = false;
     hasGetParameter = true;
-    enableRtcpReceiverReports = false;
 
     constructor(public url: string) {
         super();
@@ -712,7 +712,7 @@ export class RtspClient extends RtspBase {
                         end: parseInt(end),
                     };
                 }
-            } else if (options.type === 'udp' && this.enableRtcpReceiverReports) {
+            } else if (options.type === 'udp' && options.sendRtcpRr) {
                 // set up RTCP after receiving the response so we can check to ensure server_port is specified
                 const match = response.headers.transport.match(/.*?server_port=([0-9]+)-([0-9]+)/);
                 if (match) {

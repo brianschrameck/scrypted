@@ -564,6 +564,7 @@ class ResponseMediaStreamOptions(TypedDict):
     prebufferBytes: float
     refreshAt: float
     sdp: str
+    sendRtcpRr: bool
     source: MediaStreamSource
     tool: MediaStreamTool
     userConfigurable: bool

@@ -120,6 +120,7 @@ export async function startRtspSession(console: Console, url: string, mediaStrea
                         events.emit('rtsp', chunk);
                         resetActivityTimer?.();
                     },
+                    sendRtcpRr: mediaStreamOptions.sendRtcpRr,
                     onRtcp: (data) => {
                         rtcpSession.onRtcpSr(data);
                         const rr = rtcpSession.buildReceiverReport();

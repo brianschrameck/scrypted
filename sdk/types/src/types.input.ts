@@ -556,6 +556,10 @@ export interface ResponseMediaStreamOptions extends MediaStreamOptions {
    * want battery status reported.
    */
   allowBatteryPrebuffer?: boolean;
+  /**
+   * Set this to true to send RTCP Receiver Reports when using UDP.
+   */
+  sendRtcpRr?: boolean;
 }
 
 export type MediaStreamDestination = "local" | "remote" | "medium-resolution" | "low-resolution" | "local-recorder" | "remote-recorder";
