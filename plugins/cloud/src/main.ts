@@ -1,4 +1,4 @@
-import sdk, { BufferConverter, DeviceProvider, HttpRequest, HttpRequestHandler, HttpResponse, OauthClient, PushHandler, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings } from "@scrypted/sdk";
+import sdk, { BufferConverter, DeviceProvider, HttpRequest, HttpRequestHandler, HttpResponse, OauthClient, PushHandler, ScryptedDevice, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import axios from 'axios';
 import bpmux from 'bpmux';
@@ -373,51 +373,14 @@ class ScryptedCloud extends ScryptedDeviceBase implements OauthClient, Settings,
 
     async updateCors() {
         try {
-            if (endpointManager.setAccessControlAllowOrigin) {
-                endpointManager.setAccessControlAllowOrigin({
-                    origins: [
-                        'http://home.scrypted.app',
-                        'https://home.scrypted.app',
-                        // chromecast receiver. move this into google home and chromecast plugins?
-                        'https://koush.github.io',
-                    ],
-                });
-            }
-            else {
-                // TODO: delete this
-                // 1/25/2023
-                const corsControl = await systemManager.getComponent('cors') as CORSControlLegacy;
-                let cors = await corsControl.getCORS();
-                cors = cors.filter(entry => entry.tag !== '@scrypted/cloud');
-                cors.push(
-                    {
-                        tag: '@scrypted/cloud',
-                        server: 'https://home.scrypted.app',
-                    },
-                    {
-                        tag: '@scrypted/cloud',
-                        server: 'http://home.scrypted.app',
-                    },
-                    {
-                        tag: '@scrypted/cloud',
-                        server: 'https://koush.github.io',
-                    },
-                );
-                const { hostname } = this.storageSettings.values;
-                if (hostname) {
-                    cors.push(
-                        {
-                            tag: '@scrypted/cloud',
-                            server: `https://${hostname}`,
-                        },
-                        {
-                            tag: '@scrypted/cloud',
-                            server: `http://${hostname}`,
-                        },
-                    );
-                }
-                await corsControl.setCORS(cors);
-            }
+            endpointManager.setAccessControlAllowOrigin({
+                origins: [
+                    `http://${SCRYPTED_SERVER}`,
+                    `https://${SCRYPTED_SERVER}`,
+                    // chromecast receiver. move this into google home and chromecast plugins?
+                    'https://koush.github.io',
+                ],
+            });
         }
         catch (e) {
             this.console.error('error updating cors, is your scrypted server up to date?', e);
@@ -555,6 +518,7 @@ class ScryptedCloud extends ScryptedDeviceBase implements OauthClient, Settings,
             hostname: os.hostname(),
             registration_id: await this.manager.registrationId,
             sender_id: DEFAULT_SENDER_ID,
+            redirect_uri: `https://${SCRYPTED_SERVER}/web/oauth/callback`,
         })
         return `https://${SCRYPTED_SERVER}/_punch/login?${args}`;
         // this is disabled because we can't assume that custom domains will implement this oauth endpoint.
@@ -592,6 +556,10 @@ class ScryptedCloud extends ScryptedDeviceBase implements OauthClient, Settings,
                     res.setHeader('Location', `https://${this.getHostname()}/endpoint/@scrypted/core/public/`);
                     res.writeHead(302);
                     res.end();
+                    return;
+                }
+                else {
+                    this.oauthCallback(req, res);
                     return;
                 }
             }
@@ -702,6 +670,65 @@ class ScryptedCloud extends ScryptedDeviceBase implements OauthClient, Settings,
             }
         });
     }
+
+
+
+    async oauthCallback(req: http.IncomingMessage, res: http.ServerResponse) {
+        const reqUrl = new URL(req.url, 'https://localhost');
+
+        try {
+            const callback_url = reqUrl.searchParams.get('callback_url');
+            if (!callback_url) {
+                const html =
+                    "<head>\n" +
+                    "    <script>\n" +
+                    "        window.location = '/web/oauth/callback?callback_url=' + encodeURIComponent(window.location.toString());\n" +
+                    "    </script>\n" +
+                    "</head>\n" +
+                    "</head>\n" +
+                    "</html>"
+                res.end(html);
+                return;
+            }
+
+            const url = new URL(callback_url as string);
+            if (url.search) {
+                const state = url.searchParams.get('state');
+                if (state) {
+                    const { s, d, r } = JSON.parse(state);
+                    url.searchParams.set('state', s);
+                    const oauthClient = systemManager.getDeviceById<OauthClient>(d);
+                    await oauthClient.onOauthCallback(url.toString()).catch();
+                    res.statusCode = 302;
+                    res.setHeader('Location', r);
+                    res.end();
+                    return;
+                }
+            }
+            if (url.hash) {
+                const hash = new URLSearchParams(url.hash.substring(1));
+                const state = hash.get('state');
+                if (state) {
+                    const { s, d, r } = JSON.parse(state);
+                    hash.set('state', s);
+                    url.hash = '#' + hash.toString();
+                    const oauthClient = systemManager.getDeviceById<OauthClient>(d);
+                    await oauthClient.onOauthCallback(url.toString());
+                    res.statusCode = 302;
+                    res.setHeader('Location', r);
+                    res.end();
+                    return;
+                }
+            }
+
+            throw new Error('no state object found in query or hash');
+        }
+        catch (e) {
+            res.statusCode = 500;
+            res.end();
+        }
+    }
+
 }
 
 export default ScryptedCloud;

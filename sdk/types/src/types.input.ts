@@ -127,6 +127,8 @@ export enum ScryptedDeviceType {
   Valve = "Valve",
   Person = "Person",
   SecuritySystem = "SecuritySystem",
+  WindowCovering = "WindowCovering",
+  Siren = "Siren",
   Unknown = "Unknown",
 }
 /**
@@ -429,6 +431,10 @@ export interface ResponsePictureOptions extends PictureOptions {
    * Flag that indicates that the request supports resizing to custom dimensions.
    */
   canResize?: boolean;
+  /**
+   * Flag that indicates the camera will return a stale/cached image.
+   */
+  staleDuration?: number;
 }
 export interface RequestPictureOptions extends PictureOptions {
   reason?: 'user' | 'event';
@@ -566,12 +572,13 @@ export type MediaStreamDestination = "local" | "remote" | "medium-resolution" | 
 
 export interface RequestMediaStreamOptions extends MediaStreamOptions {
   /**
-   * When retrieving media, setting disableMediaProxies=true
-   * will bypass any intermediaries (NVR, rebroadcast) and retrieve
-   * it directly from the source. This is useful in cases when
-   * peer to peer connections are possible and preferred, such as WebRTC.
+   * When retrieving media, setting route directs how the media should be
+   * retrieved and exposed. A direct route will get the stream
+   * as is from the source. This will bypass any intermediaries if possible,
+   * such as an NVR or restreamers.
+   * An external route will request that that provided route is exposed to the local network.
    */
-  directMediaStream?: boolean;
+  route?: 'external' | 'direct';
 
   /**
    * Specify the stream refresh behavior when this stream is requested.
@@ -945,10 +952,25 @@ export interface DeviceCreatorSettings {
 export interface DeviceCreator {
   getCreateDeviceSettings(): Promise<Setting[]>;
   /**
-   * Implementation should return the native id of the created device.
-   * Callers will receive the id of the created device.
+   * Return the id of the created device.
    */
   createDevice(settings: DeviceCreatorSettings): Promise<string>;
+}
+export interface DiscoveredDevice {
+  name: string;
+  /**
+   * Identifying information such as IP Address or Serial Number.
+   */
+  description: string;
+  nativeId: ScryptedNativeId;
+  type: ScryptedDeviceType;
+  interfaces?: string[];
+  info?: DeviceInformation;
+  settings?: Setting[];
+}
+export interface AdoptDevice {
+  nativeId: ScryptedNativeId;
+  settings: DeviceCreatorSettings;
 }
 /**
  * A DeviceProvider that has a device discovery mechanism.
@@ -957,9 +979,16 @@ export interface DeviceCreator {
  */
 export interface DeviceDiscovery {
   /**
-   * Perform device discovery for the specified duration in seconds.
+   * Perform device discovery, scanning if requested.
+   * If no scan is requested, the current list of discovered devices
+   * is returned.
    */
-  discoverDevices(duration: number): Promise<void>;
+  discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]>;
+  /**
+   * Returns the id of the newly adopted device.
+   * @param device
+   */
+  adoptDevice(device: AdoptDevice): Promise<string>;
 }
 /**
  * Battery retrieves the battery level of battery powered devices.
@@ -1165,8 +1194,18 @@ export interface BoundingBoxResult {
   history?: ObjectDetectionHistory;
 }
 export interface ObjectDetectionResult extends BoundingBoxResult {
+  /**
+   * The id of the tracked object.
+   */
   id?: string;
+  /**
+   * The detection class of the object.
+   */
   className: ObjectDetectionClass;
+  /**
+   * The name of the object, if it was recognized as a familiar object (person, pet, etc).
+   */
+  name?: string;
   score: number;
   resources?: VideoResource;
 }
@@ -1199,6 +1238,12 @@ export interface ObjectDetectionTypes {
   classes?: ObjectDetectionClass[];
 }
 /**
+ * Given object detections with bounding boxes, return a similar list with tracker ids.
+ */
+export interface ObjectTracker {
+    trackObjects(detection: ObjectsDetected): Promise<ObjectsDetected>;
+}
+/**
  * ObjectDetector is found on Cameras that have smart detection capabilities.
  */
 export interface ObjectDetector {
@@ -1218,6 +1263,7 @@ export interface ObjectDetectionModel extends ObjectDetectionTypes {
   name: string;
   inputSize?: number[];
   settings: Setting[];
+  triggerClasses?: string[];
 }
 export interface ObjectDetectionCallbacks {
   onDetection(detection: ObjectsDetected, redetect?: (boundingBox: [number, number, number, number]) => Promise<ObjectDetectionResult[]>, mediaObject?: MediaObject): Promise<boolean>;
@@ -1415,8 +1461,6 @@ export interface Device {
    */
   providerNativeId?: ScryptedNativeId;
   room?: string;
-
-  internal?: boolean;
 }
 
 export interface EndpointAccessControlAllowOrigin {
@@ -1779,6 +1823,7 @@ export enum ScryptedInterface {
   PushHandler = "PushHandler",
   Program = "Program",
   Scriptable = "Scriptable",
+  ObjectTracker = "ObjectTracker",
   ObjectDetector = "ObjectDetector",
   ObjectDetection = "ObjectDetection",
   HumiditySetting = "HumiditySetting",

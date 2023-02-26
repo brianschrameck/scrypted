@@ -8,6 +8,7 @@ import { readLength } from '@scrypted/common/src/read-stream';
 import { createRtspParser, findH264NaluType, getNaluTypes, H264_NAL_TYPE_FU_B, H264_NAL_TYPE_IDR, H264_NAL_TYPE_MTAP16, H264_NAL_TYPE_MTAP32, H264_NAL_TYPE_RESERVED0, H264_NAL_TYPE_RESERVED30, H264_NAL_TYPE_RESERVED31, H264_NAL_TYPE_SEI, H264_NAL_TYPE_STAP_B, RtspServer, RtspTrack } from '@scrypted/common/src/rtsp-server';
 import { addTrackControls, parseSdp } from '@scrypted/common/src/sdp-utils';
 import { SettingsMixinDeviceBase, SettingsMixinDeviceOptions } from "@scrypted/common/src/settings-mixin";
+import { sleep } from '@scrypted/common/src/sleep';
 import { createFragmentedMp4Parser, createMpegTsParser, StreamChunk, StreamParser } from '@scrypted/common/src/stream-parser';
 import sdk, { BufferConverter, DeviceProvider, DeviceState, EventListenerRegister, FFmpegInput, H264Info, MediaObject, MediaStreamDestination, MediaStreamOptions, MixinProvider, RequestMediaStreamOptions, ResponseMediaStreamOptions, ScryptedDevice, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoCameraConfiguration } from '@scrypted/sdk';
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
@@ -1113,10 +1114,16 @@ class PrebufferSession {
         return chunk;
       }
 
-      const client = await listenZeroSingleClient();
+      const hostname = options?.route === 'external' ? '0.0.0.0' : undefined;
+      const client = await listenZeroSingleClient(hostname);
+      const rtspServerPath = '/' + crypto.randomBytes(8).toString('hex');
       socketPromise = client.clientPromise.then(async (socket) => {
         sdp = addTrackControls(sdp);
-        server = new FileRtspServer(socket, sdp);
+        server = new FileRtspServer(socket, sdp, async (method, url, headers, rawMessage) => {
+          server.checkRequest = undefined;
+          const u = new URL(url);
+          return u.pathname === rtspServerPath;
+        });
         server.writeConsole = this.console;
         if (session.parserSpecific) {
           const parserSpecific = session.parserSpecific as RtspSessionParserSpecific;
@@ -1141,7 +1148,20 @@ class PrebufferSession {
         interleavePassthrough = session.parserSpecific && serverPortMap.size === 0;
         return socket;
       })
-      url = client.url.replace('tcp://', 'rtsp://');
+      url = client.url.replace('tcp://', 'rtsp://') + rtspServerPath;
+      if (hostname) {
+        try {
+          const addresses = await sdk.endpointManager.getLocalAddresses();
+          const [address] = addresses;
+          if (address) {
+            const u = new URL(url);
+            u.hostname = address;
+            url = u.toString();
+          }
+        }
+        catch (e) {
+        }
+      }
     }
     else {
       const client = await listenZeroSingleClient();
@@ -1251,7 +1271,7 @@ class PrebufferMixin extends SettingsMixinDeviceBase<VideoCamera> implements Vid
         const u = new URL(url);
 
         for (const session of this.sessions.values()) {
-          if (u.pathname.endsWith(session.rtspServerPath)) {
+          if (u.pathname === '/' + session.rtspServerPath) {
             server.console = session.console;
             prebufferSession = session;
             prebufferSession.ensurePrebufferSession();
@@ -1259,7 +1279,7 @@ class PrebufferMixin extends SettingsMixinDeviceBase<VideoCamera> implements Vid
             server.sdp = await prebufferSession.sdp;
             return true;
           }
-          if (u.pathname.endsWith(session.rtspServerMutedPath)) {
+          if (u.pathname === '/' + session.rtspServerMutedPath) {
             server.console = session.console;
             prebufferSession = session;
             prebufferSession.ensurePrebufferSession();
@@ -1325,7 +1345,7 @@ class PrebufferMixin extends SettingsMixinDeviceBase<VideoCamera> implements Vid
   }
 
   async getVideoStream(options?: RequestMediaStreamOptions): Promise<MediaObject> {
-    if (options?.directMediaStream)
+    if (options?.route === 'direct')
       return this.mixinDevice.getVideoStream(options);
 
     await this.ensurePrebufferSessions();
@@ -1688,9 +1708,9 @@ export class RebroadcastPlugin extends AutoenableMixinProvider implements MixinP
       },
     }
   });
-  currentMixins = new Map<string, {
+  currentMixins = new Map<PrebufferMixin, {
     worker: Worker,
-    mixin: Promise<PrebufferMixin>,
+    id: string,
   }>();
 
   constructor(nativeId?: string) {
@@ -1833,71 +1853,41 @@ export class RebroadcastPlugin extends AutoenableMixinProvider implements MixinP
     catch (e) {
     }
 
+    const { id } = mixinDeviceState;
+
     if (fork && sdk.fork && typeof mixinDeviceState.id === 'string') {
       const forked = sdk.fork<RebroadcastPluginFork>();
       const { worker } = forked;
-      const { id } = mixinDeviceState;
-      const cleanupWorker = () => {
-        const found = this.currentMixins.get(id);
-        if (found?.worker === worker) {
-          worker.terminate();
-          this.currentMixins.delete(id);
-        }
-      }
-      forked.worker.on('error', e => {
-        this.console.error('prebuffer worker error', e);
-        cleanupWorker();
-      });
-      forked.worker.on('exit', exitCode => {
-        if (exitCode)
-          this.console.error('prebuffer worker error non-zero result:', exitCode);
-        else
-          this.console.log('prebuffer worker exited');
-        cleanupWorker();
-      });
-      const ret = forked.result.then(result => result.newPrebufferMixin(async () => this.transcodeStorageSettings.values, mixinDevice, mixinDeviceInterfaces, mixinDeviceState));
 
-      // scrypted should call release on the mixin, but just in case...
-      const previous = this.currentMixins.get(id);
-      if (previous?.worker) {
-        this.console.log('terminating previous worker');
-        previous.worker.terminate();
+      try {
+        const result = await forked.result;
+        const mixin = await result.newPrebufferMixin(async () => this.transcodeStorageSettings.values, mixinDevice, mixinDeviceInterfaces, mixinDeviceState);
+        this.currentMixins.set(mixin, {
+          worker,
+          id,
+        });
+        return mixin;
       }
-      this.currentMixins.set(id, {
-        worker,
-        mixin: ret,
-      });
-      return ret;
+      catch (e) {
+        throw e;
+      }
     }
     else {
-      const ret = newPrebufferMixin(async () => this.transcodeStorageSettings.values, mixinDevice, mixinDeviceInterfaces, mixinDeviceState);
-      this.currentMixins.set(mixinDeviceState.id, {
-        mixin: Promise.resolve(ret),
+      const ret = await newPrebufferMixin(async () => this.transcodeStorageSettings.values, mixinDevice, mixinDeviceInterfaces, mixinDeviceState);
+      this.currentMixins.set(ret, {
         worker: undefined,
+        id,
       });
       return ret;
     }
   }
 
   async releaseMixin(id: string, mixinDevice: PrebufferMixin) {
-    try {
-      const current = this.currentMixins.get(id);
-      const currentMixin = await current?.mixin;
-      // mixin may have changed during the await.
-      if (currentMixin === mixinDevice && this.currentMixins.get(id) === current) {
-        this.currentMixins.delete(id);
-        // TODO: 1/7/2023 remove this legacy code check, there will always be a worker
-        if (current.worker) {
-          this.console.log('terminating worker for mixin release');
-          current.worker?.terminate();
-          return;
-        }
-      }
-    }
-    catch (e) {
-    }
-
-    await mixinDevice.release();
+    const worker = this.currentMixins.get(mixinDevice)?.worker;
+    this.currentMixins.delete(mixinDevice);
+    await mixinDevice.release().catch(() => { });
+    await sleep(1000);
+    worker?.terminate();
   }
 }
 
