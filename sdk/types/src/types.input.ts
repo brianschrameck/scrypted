@@ -578,7 +578,7 @@ export interface RequestMediaStreamOptions extends MediaStreamOptions {
    * such as an NVR or restreamers.
    * An external route will request that that provided route is exposed to the local network.
    */
-  route?: 'external' | 'direct';
+  route?: 'external' | 'direct' | 'internal';
 
   /**
    * Specify the stream refresh behavior when this stream is requested.
@@ -831,7 +831,7 @@ export interface Entry {
 
 }
 export interface EntrySensor {
-  entryOpen?: boolean;
+  entryOpen?: boolean | 'jammed';
 }
 /**
  * DeviceManager is the interface used by DeviceProvider to report new devices, device states, and device events to Scrypted.
@@ -1058,16 +1058,12 @@ export interface Scriptable {
   eval(source: ScriptSource, variables?: { [name: string]: any }): Promise<any>;
 }
 
-export interface BufferConvertorOptions {
-  sourceId?: string;
-}
-
 /**
  * Add a converter to be used by Scrypted to convert buffers from one mime type to another mime type.
  * May optionally accept string urls if accept-url is a fromMimeType parameter.
  */
 export interface BufferConverter {
-  convert(data: string | Buffer | any, fromMimeType: string, toMimeType: string, options?: BufferConvertorOptions): Promise<MediaObject | Buffer | any>;
+  convert(data: string | Buffer | any, fromMimeType: string, toMimeType: string, options?: MediaObjectOptions): Promise<MediaObject | Buffer | any>;
 
   fromMimeType?: string;
   toMimeType?: string;
@@ -1351,6 +1347,7 @@ export interface MediaObjectOptions {
    * The device id of the source of the MediaObject.
    */
   sourceId?: string;
+  metadata?: any;
 }
 
 /**
@@ -1420,12 +1417,22 @@ export interface MediaManager {
    */
   getFilesPath(): Promise<string>;
 }
-export interface MediaStreamUrl {
-  url: string;
+export interface MediaContainer {
   container?: string;
   mediaStreamOptions?: ResponseMediaStreamOptions;
 }
-export interface FFmpegInput extends MediaStreamUrl {
+export interface MediaStreamUrl extends MediaContainer {
+  url: string;
+}
+export interface FFmpegInput extends MediaContainer {
+  /**
+   * The media url for this FFmpegInput.
+   */
+  url?: string;
+  /**
+   * Alternate media urls for this FFmpegInput.
+   */
+  urls?: string[];
   inputArguments?: string[];
   destinationVideoBitrate?: number;
   h264EncoderArguments?: string[];
@@ -1438,6 +1445,7 @@ export interface DeviceInformation {
   version?: string;
   firmware?: string;
   serialNumber?: string;
+  ip?: string;
   mac?: string;
   metadata?: any;
   managementUrl?: string;
@@ -2081,4 +2089,11 @@ export interface ScryptedStatic {
    * @param options
    */
   connect?(socket: NodeNetSocket, options?: ConnectOptions): void;
+  /**
+   * Attempt to retrieve an RPC object by directly connecting to the plugin
+   * that created the object. All operations on this object will bypass routing
+   * through the Scrypted Server which typically manages plugin communication.
+   * This is ideal for sending large amounts of data.
+   */
+  connectRPCObject?<T>(value: T): Promise<T>; 
 }
