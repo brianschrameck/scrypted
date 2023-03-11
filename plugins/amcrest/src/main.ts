@@ -5,7 +5,8 @@ import child_process, { ChildProcess } from 'child_process';
 import { PassThrough, Readable, Stream } from "stream";
 import { OnvifIntercom } from "../../onvif/src/onvif-intercom";
 import { RtspProvider, RtspSmartCamera, UrlMediaStreamOptions } from "../../rtsp/src/rtsp";
-import { AmcrestCameraClient, AmcrestEvent, amcrestHttpsAgent } from "./amcrest-api";
+import { AmcrestCameraClient, AmcrestEvent } from "./amcrest-api";
+import { amcrestHttpsAgent } from './probe';
 
 const { mediaManager } = sdk;
 
@@ -37,19 +38,6 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
         }
 
         this.updateDeviceInfo();
-        this.updateManagementUrl();
-    }
-
-    updateManagementUrl() {
-        const ip = this.storage.getItem('ip');
-        if (!ip)
-            return;
-        const info = this.info || {};
-        const managementUrl = `http://${ip}`;
-        if (info.managementUrl !== managementUrl) {
-            info.managementUrl = managementUrl;
-            this.info = info;
-        }
     }
 
     getRecordingStreamCurrentTime(recordingStream: MediaObject): Promise<number> {
@@ -80,9 +68,16 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
     }
 
     async updateDeviceInfo(): Promise<void> {
-        if (this.info)
+        const ip = this.storage.getItem('ip');
+        if (!ip)
             return;
-        const deviceInfo = {};
+
+        const managementUrl = `http://${ip}`;
+        const deviceInfo: DeviceInformation = {
+            ...this.info,
+            ip,
+            managementUrl,
+        };
 
         const deviceParameters = [
             { action: "getVendor", replace: "vendor=", parameter: "manufacturer" },
@@ -161,6 +156,8 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
         const client = new AmcrestCameraClient(this.getHttpAddress(), this.getUsername(), this.getPassword(), this.console);
         const events = await client.listenEvents();
         const doorbellType = this.storage.getItem('doorbellType');
+        const callerId = this.storage.getItem('callerID');
+        const multipleCallIds = this.storage.getItem('multipleCallIds') === 'true';
 
         let pulseTimeout: NodeJS.Timeout;
 
@@ -187,11 +184,21 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
                 || event === AmcrestEvent.PhoneCallDetectStart
                 || event === AmcrestEvent.AlarmIPCStart
                 || event === AmcrestEvent.DahuaTalkInvite) {
-                this.binaryState = true;
+                if (event === AmcrestEvent.DahuaTalkInvite && payload && multipleCallIds)
+                {
+                    if (payload.includes(callerId))
+                    {
+                        this.binaryState = true;
+                    }
+                } else 
+                {
+                    this.binaryState = true;
+                }
             }
             else if (event === AmcrestEvent.TalkHangup
                 || event === AmcrestEvent.PhoneCallDetectStop
                 || event === AmcrestEvent.AlarmIPCStop
+                || event === AmcrestEvent.DahuaCallDeny
                 || event === AmcrestEvent.DahuaTalkHangup) {
                 this.binaryState = false;
             }
@@ -246,6 +253,36 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
 
         if (!twoWayAudio)
             twoWayAudio = isDoorbell ? 'Amcrest' : 'None';
+        
+        
+        if (doorbellType == DAHUA_DOORBELL_TYPE)
+        {
+            ret.push(
+               {
+                title: 'Multiple Call Buttons',
+                key: 'multipleCallIds',
+                description: 'Some Dahua Doorbells integrate multiple Call Buttons for apartment buildings.',
+                type: 'boolean',
+                value: (this.storage.getItem('multipleCallIds') === 'true').toString(),
+               } 
+            );
+        }
+
+        const multipleCallIds = this.storage.getItem('multipleCallIds');
+
+        if (multipleCallIds)
+        {
+            ret.push(
+                {
+                    title: 'Caller ID',
+                    key: 'callerID',
+                    description: 'Caller ID',
+                    type: 'number',
+                    value: this.storage.getItem('callerID'),
+                }
+            )
+        }
+        
 
         ret.push(
             {
@@ -266,7 +303,11 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
         );
 
         return ret;
+        
     }
+    
+    
+    
 
     async takeSmartCameraPicture(option?: PictureOptions): Promise<MediaObject> {
         return this.createMediaObject(await this.getClient().jpegSnapshot(), 'image/jpeg');
@@ -441,7 +482,7 @@ class AmcrestCamera extends RtspSmartCamera implements VideoCameraConfiguration,
             interfaces.push(ScryptedInterface.VideoRecorder);
         this.provider.updateDevice(this.nativeId, this.name, interfaces, type);
 
-        this.updateManagementUrl();
+        this.updateDeviceInfo();
     }
 
     async startIntercom(media: MediaObject): Promise<void> {
@@ -550,9 +591,10 @@ class AmcrestProvider extends RtspProvider {
         const username = settings.username?.toString();
         const password = settings.password?.toString();
         const skipValidate = settings.skipValidate === 'true';
+        let twoWayAudio: string;
         if (!skipValidate) {
+            const api = new AmcrestCameraClient(httpAddress, username, password, this.console);
             try {
-                const api = new AmcrestCameraClient(httpAddress, username, password, this.console);
                 const deviceInfo = await api.getDeviceInfo();
 
                 settings.newCamera = deviceInfo.deviceType;
@@ -562,6 +604,16 @@ class AmcrestProvider extends RtspProvider {
             catch (e) {
                 this.console.error('Error adding Amcrest camera', e);
                 throw e;
+            }
+
+            try {
+                if (await api.checkTwoWayAudio()) {
+                    // onvif seems to work better than Amcrest, except for AD110.
+                    twoWayAudio = 'ONVIF';
+                }
+            }
+            catch (e) {
+                this.console.warn('Error probing two way audio', e);
             }
         }
         settings.newCamera ||= 'Hikvision Camera';
@@ -574,6 +626,8 @@ class AmcrestProvider extends RtspProvider {
         device.putSetting('password', password);
         device.setIPAddress(settings.ip?.toString());
         device.setHttpPortOverride(settings.httpPort?.toString());
+        if (twoWayAudio)
+            device.putSetting('twoWayAudio', twoWayAudio);
         return nativeId;
     }
 

@@ -1,13 +1,13 @@
 import { ffmpegLogInitialOutput } from '@scrypted/common/src/media-helpers';
 import { readLength } from '@scrypted/common/src/read-stream';
-import sdk, { Camera, DeviceCreatorSettings, DeviceInformation, FFmpegInput, Intercom, MediaObject, MediaStreamOptions, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, VideoStreamOptions } from "@scrypted/sdk";
+import sdk, { Camera, DeviceCreatorSettings, DeviceInformation, FFmpegInput, Intercom, MediaObject, MediaStreamOptions, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting } from "@scrypted/sdk";
 import child_process, { ChildProcess } from 'child_process';
 import { PassThrough, Readable } from "stream";
-import { sleep } from "../../../common/src/sleep";
+import xml2js from 'xml2js';
 import { OnvifIntercom } from "../../onvif/src/onvif-intercom";
 import { RtspProvider, RtspSmartCamera, UrlMediaStreamOptions } from "../../rtsp/src/rtsp";
-import { getChannel, HikvisionCameraAPI, HikvisionCameraEvent, hikvisionHttpsAgent } from "./hikvision-camera-api";
-import xml2js from 'xml2js';
+import { HikvisionCameraAPI, HikvisionCameraEvent } from "./hikvision-camera-api";
+import { hikvisionHttpsAgent } from './probe';
 
 const { mediaManager } = sdk;
 
@@ -26,19 +26,29 @@ class HikvisionCamera extends RtspSmartCamera implements Camera, Intercom {
     constructor(nativeId: string, provider: RtspProvider) {
         super(nativeId, provider);
 
-        this.updateManagementUrl();
+        this.updateDeviceInfo();
     }
 
-    updateManagementUrl() {
+    async updateDeviceInfo() {
         const ip = this.storage.getItem('ip');
         if (!ip)
             return;
-        const info = this.info || {};
         const managementUrl = `http://${ip}`;
-        if (info.managementUrl !== managementUrl) {
-            info.managementUrl = managementUrl;
-            this.info = info;
+        const info: DeviceInformation = {
+            ...this.info,
+            managementUrl,
+            ip,
+            manufacturer: 'Hikvision', 
+        };
+        const client = this.getClient();
+        const deviceInfo = await client.getDeviceInfo().catch(() => { });
+        if (deviceInfo) {
+            info.model = deviceInfo.deviceModel;
+            info.mac = deviceInfo.macAddress;
+            info.firmware = deviceInfo.firmwareVersion;
+            info.serialNumber = deviceInfo.serialNumber;
         }
+        this.info = info;
     }
 
     async listenEvents() {
@@ -284,7 +294,7 @@ class HikvisionCamera extends RtspSmartCamera implements Camera, Intercom {
 
         this.provider.updateDevice(this.nativeId, this.name, interfaces, type);
 
-        this.updateManagementUrl();
+        this.updateDeviceInfo();
     }
 
     async getOtherSettings(): Promise<Setting[]> {
@@ -526,9 +536,10 @@ class HikvisionProvider extends RtspProvider {
         const username = settings.username?.toString();
         const password = settings.password?.toString();
         const skipValidate = settings.skipValidate === 'true';
+        let twoWayAudio: string;
         if (!skipValidate) {
+            const api = new HikvisionCameraAPI(httpAddress, username, password, this.console);
             try {
-                const api = new HikvisionCameraAPI(httpAddress, username, password, this.console);
                 const deviceInfo = await api.getDeviceInfo();
 
                 settings.newCamera = deviceInfo.deviceName;
@@ -542,6 +553,15 @@ class HikvisionProvider extends RtspProvider {
                 this.console.error('Error adding Hikvision camera', e);
                 throw e;
             }
+
+            try {
+                if (await api.checkTwoWayAudio()) {
+                    twoWayAudio = 'Hikvision';
+                }
+            }
+            catch (e) {
+                this.console.warn('Error probing two way audio', e);
+            }
         }
         settings.newCamera ||= 'Hikvision Camera';
 
@@ -553,6 +573,8 @@ class HikvisionProvider extends RtspProvider {
         device.putSetting('password', password);
         device.setIPAddress(settings.ip?.toString());
         device.setHttpPortOverride(settings.httpPort?.toString());
+        if (twoWayAudio)
+            device.putSetting('twoWayAudio', twoWayAudio);
         return nativeId;
     }
 

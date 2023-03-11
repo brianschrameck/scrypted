@@ -1,10 +1,12 @@
-import sdk, { AdoptDevice, Device, DeviceCreatorSettings, DeviceDiscovery, DeviceInformation, DiscoveredDevice, Intercom, MediaObject, MediaStreamOptions, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, PictureOptions, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting, Settings, SettingValue, VideoCamera, VideoCameraConfiguration } from "@scrypted/sdk";
+import sdk, { AdoptDevice, Device, DeviceCreatorSettings, DeviceDiscovery, DeviceInformation, DiscoveredDevice, Intercom, MediaObject, MediaStreamOptions, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, PanTiltZoom, PanTiltZoomCommand, PictureOptions, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting, Settings, SettingValue, VideoCamera, VideoCameraConfiguration } from "@scrypted/sdk";
+import { AddressInfo } from "net";
 import onvif from 'onvif';
 import { Stream } from "stream";
 import xml2js from 'xml2js';
 import { Destroyable, RtspProvider, RtspSmartCamera, UrlMediaStreamOptions } from "../../rtsp/src/rtsp";
 import { connectCameraAPI, OnvifCameraAPI, OnvifEvent } from "./onvif-api";
 import { OnvifIntercom } from "./onvif-intercom";
+import { OnvifPTZMixinProvider } from "./onvif-ptz";
 
 const { mediaManager, systemManager, deviceManager } = sdk;
 
@@ -37,7 +39,7 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
     constructor(nativeId: string, provider: RtspProvider) {
         super(nativeId, provider);
 
-        this.updateManagementUrl();
+        this.updateDeviceInfo();
         this.updateDevice();
     }
 
@@ -94,16 +96,30 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
         });
     }
 
-    updateManagementUrl() {
+    async updateDeviceInfo() {
         const ip = this.storage.getItem('ip');
         if (!ip)
             return;
-        const info = this.info || {};
+        const client = await this.getClient();
+        const onvifInfo = await client.getDeviceInformation().catch(() => { });
+
         const managementUrl = `http://${ip}`;
-        if (info.managementUrl !== managementUrl) {
-            info.managementUrl = managementUrl;
-            this.info = info;
+        let info = {
+            ...this.info,
+            managementUrl,
+            ip,
+        };
+        if (onvifInfo) {
+            info = {
+                ...info,
+                serialNumber: onvifInfo.serialNumber,
+                manufacturer: onvifInfo.manufacturer,
+                firmware: onvifInfo.firmwareVersion,
+                model: onvifInfo.model,
+            }
         }
+
+        this.info = info;
     }
 
     getDetectionInput(detectionId: any, eventId?: any): Promise<MediaObject> {
@@ -378,11 +394,11 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
         this.onDeviceEvent(ScryptedInterface.Settings, undefined);
     }
 
-    async putSetting(key: string, value: string) {
+    async putSetting(key: string, value: any) {
         this.client = undefined;
         this.rtspMediaStreamOptions = undefined;
 
-        this.updateManagementUrl();
+        this.updateDeviceInfo();
 
         if (key !== 'onvifDoorbell' && key !== 'onvifTwoWay')
             return super.putSetting(key, value);
@@ -414,7 +430,18 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
     constructor(nativeId?: string) {
         super(nativeId);
 
-        onvif.Discovery.on('device', (cam: any, rinfo: any, xml: any) => {
+        process.nextTick(() => {
+            deviceManager.onDeviceDiscovered({
+                name: 'ONVIF PTZ',
+                type: ScryptedDeviceType.Builtin,
+                nativeId: 'ptz',
+                interfaces: [
+                    ScryptedInterface.MixinProvider,
+                ]
+            })
+        })
+
+        onvif.Discovery.on('device', (cam: any, rinfo: AddressInfo, xml: any) => {
             // Function will be called as soon as the NVT responses
 
             // Parsing of Discovery responses taken from my ONVIF-Audit project, part of the 2018 ONVIF Open Source Challenge
@@ -435,19 +462,29 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
                     }
                     const urn = result['Envelope']['Body'][0]['ProbeMatches'][0]['ProbeMatch'][0]['EndpointReference'][0]['Address'][0].payload;
                     const xaddrs = result['Envelope']['Body'][0]['ProbeMatches'][0]['ProbeMatch'][0]['XAddrs'][0].payload;
-                    let name: string;
+                    const knownScopes = {
+                        'onvif://www.onvif.org/name/': '',
+                        'onvif://www.onvif.org/MAC/': '',
+                        'onvif://www.onvif.org/hardware/': '',
+                    };
 
+                    this.console.log('discovered device payload', xml);
                     try {
                         let scopes = result['Envelope']['Body'][0]['ProbeMatches'][0]['ProbeMatch'][0]['Scopes'][0].payload;
-                        scopes = scopes.split(" ");
+                        const splitScopes = scopes.split(" ") as string[];
 
-                        for (let i = 0; i < scopes.length; i++) {
-                            if (scopes[i].includes('onvif://www.onvif.org/name')) { name = decodeURI(scopes[i].substring(27)); }
+                        for (const scope of splitScopes) {
+                            for (const known of Object.keys(knownScopes)) {
+                                if (scope.startsWith(known)) {
+                                    knownScopes[known] = decodeURIComponent(scope.substring(known.length));
+                                }
+                            }
                         }
                     }
                     catch (e) {
                     }
 
+                    const name = knownScopes["onvif://www.onvif.org/name/"] || 'ONVIF Camera';
                     this.console.log('Discovery Reply from ' + rinfo.address + ' (' + name + ') (' + xaddrs + ') (' + urn + ')');
 
                     if (deviceManager.getNativeIds().includes(urn) || this.discoveredDevices.has(urn))
@@ -455,6 +492,11 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
 
                     const device: Device = {
                         name,
+                        info: {
+                            ip: rinfo.address,
+                            mac: knownScopes["onvif://www.onvif.org/MAC/"] || undefined,
+                            model: knownScopes['onvif://www.onvif.org/hardware/'] || undefined,
+                        },
                         nativeId: urn,
                         type: ScryptedDeviceType.Camera,
                         interfaces: this.getInterfaces(),
@@ -481,6 +523,12 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
         })
     }
 
+    async getDevice(nativeId: string) {
+        if (nativeId === 'ptz')
+            return new OnvifPTZMixinProvider('ptz');
+        return super.getDevice(nativeId);
+    }
+
     getAdditionalInterfaces() {
         return [
             ScryptedInterface.Camera,
@@ -501,6 +549,7 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
         const username = settings.username?.toString();
         const password = settings.password?.toString();
         const skipValidate = settings.skipValidate === 'true';
+        let ptzCapabilities: string[];
         if (!skipValidate) {
             try {
                 const api = await connectCameraAPI(httpAddress, username, password, this.console, undefined);
@@ -515,6 +564,12 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
                 }
 
                 settings.newCamera = info.model;
+
+                api.cam.services.find((s: any) => s.namespace === 'http://www.onvif.org/ver20/ptz/wsdl');
+                ptzCapabilities = [
+                    'Pan',
+                    'Tilt',
+                ];
             }
             catch (e) {
                 this.console.error('Error adding ONVIF camera', e);
@@ -531,6 +586,31 @@ class OnvifProvider extends RtspProvider implements DeviceDiscovery {
         device.putSetting('password', password);
         device.setIPAddress(settings.ip?.toString());
         device.setHttpPortOverride(settings.httpPort?.toString());
+
+        const intercom = new OnvifIntercom(device);
+        try {
+            intercom.url = (await device.getConstructedVideoStreamOptions())[0].url;
+            if (await intercom.checkIntercom()) {
+                device.putSetting('onvifTwoWay', 'true');
+            }
+        }
+        catch (e) {
+            this.console.warn("error while probing intercom", e);
+        }
+        finally {
+            intercom.intercomClient?.client.destroy();
+        }
+
+        if (ptzCapabilities) {
+            try {
+                const rd = sdk.systemManager.getDeviceById(device.id);
+                const ptz = await this.getDevice('ptz');
+                rd.setMixins([...(rd.mixins || []), ptz.id]);
+            }
+            catch (e) {
+            }
+        }
+
         return nativeId;
     }
 
