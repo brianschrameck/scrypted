@@ -159,13 +159,18 @@ class RpcProxy implements PrimitiveProxyHandler<any> {
     }
 
     apply(target: any, thisArg: any, argArray?: any): any {
-        if (Object.isFrozen(this.peer.pendingResults))
-            return Promise.reject(new RPCResultError(this.peer, 'RpcPeer has been killed'));
+        const method = target() || null;
+        const oneway = this.proxyOneWayMethods?.includes?.(method);
+
+        if (Object.isFrozen(this.peer.pendingResults)) {
+            if (oneway)
+                return Promise.resolve();
+            return Promise.reject(new RPCResultError(this.peer, 'RpcPeer has been killed (apply) ' + target()));
+        }
 
         // rpc objects can be functions. if the function is a oneway method,
         // it will have a null in the oneway method list. this is because
         // undefined is not JSON serializable.
-        const method = target() || null;
         const args: any[] = [];
         const serializationContext: any = {};
         for (const arg of (argArray || [])) {
@@ -180,7 +185,7 @@ class RpcProxy implements PrimitiveProxyHandler<any> {
             method,
         };
 
-        if (this.proxyOneWayMethods?.includes?.(method)) {
+        if (oneway) {
             rpcApply.oneway = true;
             // a oneway callable object doesn't need to be in the JSON payload.
             if (method === null)
@@ -195,11 +200,17 @@ class RpcProxy implements PrimitiveProxyHandler<any> {
         });
 
         const asyncIterator = this.proxyProps?.[Symbol.asyncIterator.toString()];
-        if (!asyncIterator || method !== asyncIterator.next)
+        if (!asyncIterator || (method !== asyncIterator.next && method !== asyncIterator.return))
             return pendingResult;
 
         return pendingResult
             .then(value => {
+                if (method === asyncIterator.return) {
+                    return {
+                        done: true,
+                        value: undefined,
+                    }
+                }
                 return ({
                     value,
                     done: false,
@@ -292,14 +303,14 @@ export class RpcPeer {
     pendingResults: { [id: string]: Deferred } = {};
     proxyCounter = 1;
     localProxied = new Map<any, LocalProxiedEntry>();
-    localProxyMap: { [id: string]: any } = {};
+    localProxyMap = new Map<string, any>();
     // @ts-ignore
     remoteWeakProxies: { [id: string]: WeakRef<any> } = {};
     // @ts-ignore
     finalizers = new FinalizationRegistry(entry => this.finalize(entry as LocalProxiedEntry));
     nameDeserializerMap = new Map<string, RpcSerializer>();
     onProxyTypeSerialization = new Map<string, (value: any) => void>();
-    onProxySerialization: (value: any, proxyId: string) => void;
+    onProxySerialization: (value: any, proxyId: string) => any;
     constructorSerializerMap = new Map<any, string>();
     transportSafeArgumentTypes = RpcPeer.getDefaultTransportSafeArgumentTypes();
     killed: Promise<string>;
@@ -343,12 +354,19 @@ export class RpcPeer {
         }
     }
 
-    static setProxyProperties(value: any, properties: any) {
-        value[RpcPeer.PROPERTY_PROXY_PROPERTIES] = properties;
-    }
+    // static setProxyProperties(value: any, properties: any) {
+    //     value[RpcPeer.PROPERTY_PROXY_PROPERTIES] = properties;
+    // }
 
-    static getProxyProperties(value: any) {
-        return value?.[RpcPeer.PROPERTY_PROXY_PROPERTIES];
+    // static getProxyProperties(value: any) {
+    //     return value?.[RpcPeer.PROPERTY_PROXY_PROPERTIES];
+    // }
+
+    static getIteratorNext(target: any): string {
+        if (!target[Symbol.asyncIterator])
+            return;
+        const proxyProps = target[this.PROPERTY_PROXY_PROPERTIES]?.[Symbol.asyncIterator.toString()];
+        return proxyProps?.next || 'next';
     }
 
     static prepareProxyProperties(value: any) {
@@ -356,11 +374,13 @@ export class RpcPeer {
         if (!value[Symbol.asyncIterator])
             return props;
         props ||= {};
-        props[Symbol.asyncIterator.toString()] = {
-            next: 'next',
-            throw: 'throw',
-            return: 'return',
-        };
+        if (!props[Symbol.asyncIterator.toString()]) {
+            props[Symbol.asyncIterator.toString()] = {
+                next: 'next',
+                throw: 'throw',
+                return: 'return',
+            };
+        }
         return props;
     }
 
@@ -388,9 +408,17 @@ export class RpcPeer {
         }).catch(e => e.message || 'Unknown Error');
     }
 
+    static isTransportSafe(value: any) {
+        return !value || (!value[RpcPeer.PROPERTY_JSON_DISABLE_SERIALIZATION] && this.getDefaultTransportSafeArgumentTypes().has(value.constructor?.name));
+    }
+
+    isTransportSafe(value: any) {
+        return !value || (!value[RpcPeer.PROPERTY_JSON_DISABLE_SERIALIZATION] && this.transportSafeArgumentTypes.has(value.constructor?.name));
+    }
+
     createPendingResult(cb: (id: string, reject: (e: Error) => void) => void): Promise<any> {
         if (Object.isFrozen(this.pendingResults))
-            return Promise.reject(new RPCResultError(this, 'RpcPeer has been killed'));
+            return Promise.reject(new RPCResultError(this, 'RpcPeer has been killed (createPendingResult)'));
 
         const promise = new Promise((resolve, reject) => {
             const id = (this.idCounter++).toString();
@@ -416,7 +444,7 @@ export class RpcPeer {
         this.pendingResults = Object.freeze({});
         this.params = Object.freeze({});
         this.remoteWeakProxies = Object.freeze({});
-        this.localProxyMap = Object.freeze({});
+        this.localProxyMap.clear()
         this.localProxied.clear();
     }
 
@@ -511,7 +539,7 @@ export class RpcPeer {
         }
 
         if (__local_proxy_id) {
-            const ret = this.localProxyMap[__local_proxy_id];
+            const ret = this.localProxyMap.get(__local_proxy_id);
             if (!ret)
                 throw new RPCResultError(this, `invalid local proxy id ${__local_proxy_id}`);
             return ret;
@@ -556,7 +584,7 @@ export class RpcPeer {
             return ret;
         }
 
-        if (!value || (!value[RpcPeer.PROPERTY_JSON_DISABLE_SERIALIZATION] && this.transportSafeArgumentTypes.has(value.constructor?.name))) {
+        if (this.isTransportSafe(value)) {
             return value;
         }
 
@@ -564,6 +592,24 @@ export class RpcPeer {
 
         if (value instanceof Error)
             return this.serializeError(value);
+
+        const serializerMapName = this.constructorSerializerMap.get(value.constructor);
+        if (serializerMapName) {
+            __remote_constructor_name = serializerMapName;
+            const serializer = this.nameDeserializerMap.get(serializerMapName);
+            if (!serializer)
+                throw new Error('serializer not found for ' + serializerMapName);
+            const serialized = serializer.serialize(value, serializationContext);
+            const ret: RpcRemoteProxyValue = {
+                __remote_proxy_id: undefined,
+                __remote_proxy_finalizer_id: undefined,
+                __remote_constructor_name,
+                __remote_proxy_props: RpcPeer.prepareProxyProperties(value),
+                __remote_proxy_oneway_methods: value?.[RpcPeer.PROPERTY_PROXY_ONEWAY_METHODS],
+                __serialized_value: serialized,
+            }
+            return ret;
+        }
 
         let proxiedEntry = this.localProxied.get(value);
         if (proxiedEntry) {
@@ -589,39 +635,21 @@ export class RpcPeer {
 
         this.onProxyTypeSerialization.get(__remote_constructor_name)?.(value);
 
-        const serializerMapName = this.constructorSerializerMap.get(value.constructor);
-        if (serializerMapName) {
-            __remote_constructor_name = serializerMapName;
-            const serializer = this.nameDeserializerMap.get(serializerMapName);
-            if (!serializer)
-                throw new Error('serializer not found for ' + serializerMapName);
-            const serialized = serializer.serialize(value, serializationContext);
-            const ret: RpcRemoteProxyValue = {
-                __remote_proxy_id: undefined,
-                __remote_proxy_finalizer_id: undefined,
-                __remote_constructor_name,
-                __remote_proxy_props: RpcPeer.prepareProxyProperties(value),
-                __remote_proxy_oneway_methods: value?.[RpcPeer.PROPERTY_PROXY_ONEWAY_METHODS],
-                __serialized_value: serialized,
-            }
-            return ret;
-        }
-
         const __remote_proxy_id = (this.proxyCounter++).toString();
         proxiedEntry = {
             id: __remote_proxy_id,
             finalizerId: __remote_proxy_id,
         };
         this.localProxied.set(value, proxiedEntry);
-        this.localProxyMap[__remote_proxy_id] = value;
+        this.localProxyMap.set(__remote_proxy_id, value);
 
-        this.onProxySerialization?.(value, __remote_proxy_id);
+        const __remote_proxy_props = this.onProxySerialization ? this.onProxySerialization(value, __remote_proxy_id) : RpcPeer.prepareProxyProperties(value);
 
         const ret: RpcRemoteProxyValue = {
             __remote_proxy_id,
             __remote_proxy_finalizer_id: __remote_proxy_id,
             __remote_constructor_name,
-            __remote_proxy_props: RpcPeer.prepareProxyProperties(value),
+            __remote_proxy_props,
             __remote_proxy_oneway_methods: value?.[RpcPeer.PROPERTY_PROXY_ONEWAY_METHODS],
         }
 
@@ -664,11 +692,19 @@ export class RpcPeer {
                 case 'param': {
                     const rpcParam = message as RpcParam;
                     const serializationContext: any = {};
-                    const result: RpcResult = {
-                        type: 'result',
-                        id: rpcParam.id,
-                        result: this.serialize(this.params[rpcParam.param], serializationContext)
-                    };
+                    let result: RpcResult;
+                    try {
+                        result = {
+                            type: 'result',
+                            id: rpcParam.id,
+                            result: this.serialize(this.params[rpcParam.param], serializationContext)
+                        };
+                    }
+                    catch (e) {
+                        // console.error('failure', rpcApply.method, e);
+                        this.createErrorResult(result, e);
+                    }
+
                     this.send(result, undefined, serializationContext);
                     break;
                 }
@@ -681,7 +717,7 @@ export class RpcPeer {
                     const serializationContext: any = {};
 
                     try {
-                        const target = this.localProxyMap[rpcApply.proxyId];
+                        const target = this.localProxyMap.get(rpcApply.proxyId);
                         if (!target)
                             throw new Error(`proxy id ${rpcApply.proxyId} not found`);
 
@@ -697,7 +733,7 @@ export class RpcPeer {
                                 throw new Error(`target ${target?.constructor?.name} does not have method ${rpcApply.method}`);
                             value = await target[rpcApply.method](...args);
 
-                            if (target[Symbol.asyncIterator] && rpcApply.method === 'next') {
+                            if (RpcPeer.getIteratorNext(target) === rpcApply.method) {
                                 if (value.done) {
                                     const errorType: ErrorType = {
                                         name: 'StopAsyncIteration',
@@ -749,14 +785,14 @@ export class RpcPeer {
                 }
                 case 'finalize': {
                     const rpcFinalize = message as RpcFinalize;
-                    const local = this.localProxyMap[rpcFinalize.__local_proxy_id];
+                    const local = this.localProxyMap.get(rpcFinalize.__local_proxy_id);
                     if (local) {
                         const localProxiedEntry = this.localProxied.get(local);
                         // if a finalizer id is specified, it must match.
                         if (rpcFinalize.__local_proxy_finalizer_id && rpcFinalize.__local_proxy_finalizer_id !== localProxiedEntry?.finalizerId) {
                             break;
                         }
-                        delete this.localProxyMap[rpcFinalize.__local_proxy_id];
+                        this.localProxyMap.delete(rpcFinalize.__local_proxy_id);
                         this.localProxied.delete(local);
                     }
                     break;

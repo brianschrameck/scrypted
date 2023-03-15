@@ -4,12 +4,16 @@ import io
 from PIL import Image
 import re
 import scrypted_sdk
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Mapping
 import asyncio
 import time
 from .rectangle import Rectangle, intersect_area, intersect_rect, to_bounding_box, from_bounding_box, combine_rect
 
 from detect import DetectionSession, DetectPlugin
+
+from .sort_oh import tracker
+import numpy as np
+import traceback
 
 try:
     from gi.repository import Gst
@@ -18,12 +22,14 @@ except:
 
 class PredictSession(DetectionSession):
     image: Image.Image
+    tracker: sort_oh.tracker.Sort_OH
 
     def __init__(self, start_time: float) -> None:
         super().__init__()
         self.image = None
         self.processed = 0
         self.start_time = start_time
+        self.tracker = None
 
 def parse_label_contents(contents: str):
     lines = contents.splitlines()
@@ -114,6 +120,7 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
         self.toMimeType = scrypted_sdk.ScryptedMimeTypes.MediaObject.value
 
         self.crop = False
+        self.trackers: Mapping[str, tracker.Sort_OH] = {}
 
         # periodic restart because there seems to be leaks in tflite or coral API.
         loop = asyncio.get_event_loop()
@@ -191,8 +198,23 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
             ],
         }
 
-        return [allowList]
-
+        trackerWindow: Setting = {
+            'title': 'Tracker Window',
+            'subgroup': 'Advanced',
+            'description': 'Internal Setting. Do not change.',
+            'key': 'trackerWindow',
+            'value': 3,
+            'type': 'number',
+        }
+        trackerCertainty: Setting = {
+            'title': 'Tracker Certainty',
+            'subgroup': 'Advanced',
+            'description': 'Internal Setting. Do not change.',
+            'key': 'trackerCertainty',
+            'value': .2,
+            'type': 'number',
+        }
+        return [allowList, trackerWindow, trackerCertainty]
 
     def create_detection_result(self, objs: List[Prediction], size, allowList, convert_to_src_size=None) -> ObjectsDetected:
         detections: List[ObjectDetectionResult] = []
@@ -231,6 +253,8 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
     def run_detection_jpeg(self, detection_session: PredictSession, image_bytes: bytes, settings: Any) -> ObjectsDetected:
         stream = io.BytesIO(image_bytes)
         image = Image.open(stream)
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
 
         detections, _ = self.run_detection_image(detection_session, image, settings, image.size)
         return detections
@@ -248,9 +272,130 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
     def detect_once(self, input: Image.Image, settings: Any, src_size, cvss) -> ObjectsDetected:
         pass
 
+    async def run_detection_videoframe(self, videoFrame: scrypted_sdk.VideoFrame, settings: Any) -> ObjectsDetected:
+        src_size = videoFrame.width, videoFrame.height
+        w, h = self.get_input_size()
+        iw, ih = src_size
+        ws = w / iw
+        hs = h / ih
+        s = max(ws, hs)
+        if ws == 1 and hs == 1:
+            def cvss(point, normalize=False):
+                return point[0], point[1], True
+
+            data = await videoFrame.toBuffer({
+                'format': 'rgb',
+            })
+            image = Image.frombuffer('RGB', (w, h), data)
+            try:
+                ret = self.detect_once(image, settings, src_size, cvss)
+                return ret
+            finally:
+                image.close()
+
+        sw = int(w / s)
+        sh = int(h / s)
+        first_crop = (0, 0, sw, sh)
+
+
+        ow = iw - sw
+        oh = ih - sh
+        second_crop = (ow, oh, ow + sw, oh + sh)
+
+        firstData, secondData = await asyncio.gather(
+            videoFrame.toBuffer({
+                'resize': {
+                    'width': w,
+                    'height': h,
+                },
+                'crop': {
+                    'left': 0,
+                    'top': 0,
+                    'width': sw,
+                    'height': sh,
+                },
+                'format': 'rgb',
+            }),
+            videoFrame.toBuffer({
+                'resize': {
+                    'width': w,
+                    'height': h,
+                },
+                'crop': {
+                    'left': ow,
+                    'top': oh,
+                    'width': sw,
+                    'height': sh,
+                },
+                'format': 'rgb',
+            })
+        )
+
+        first = Image.frombuffer('RGB', (w, h), firstData)
+        second = Image.frombuffer('RGB', (w, h), secondData)
+
+        def cvss1(point, normalize=False):
+            return point[0] / s, point[1] / s, True
+        def cvss2(point, normalize=False):
+            return point[0] / s + ow, point[1] / s + oh, True
+
+        ret1 = self.detect_once(first, settings, src_size, cvss1)
+        first.close()
+        ret2 = self.detect_once(second, settings, src_size, cvss2)
+        second.close()
+
+        two_intersect = intersect_rect(Rectangle(*first_crop), Rectangle(*second_crop))
+
+        def is_same_detection_middle(d1: ObjectDetectionResult, d2: ObjectDetectionResult):
+            same, ret = is_same_detection(d1, d2)
+            if same:
+                return same, ret
+
+            if d1['className'] != d2['className']:
+                return False, None
+
+            r1 = from_bounding_box(d1['boundingBox'])
+            m1 = intersect_rect(two_intersect, r1)
+            if not m1:
+                return False, None
+
+            r2 = from_bounding_box(d2['boundingBox'])
+            m2 = intersect_rect(two_intersect, r2)
+            if not m2:
+                return False, None
+
+            same, ret = is_same_box(to_bounding_box(m1), to_bounding_box(m2))
+            if not same:
+                return False, None
+            c = to_bounding_box(combine_rect(r1, r2))
+            return True, c
+
+        ret = ret1
+        ret['detections'] = dedupe_detections(ret1['detections'] + ret2['detections'], is_same_detection=is_same_detection_middle)
+        return ret
+    
     def run_detection_image(self, detection_session: PredictSession, image: Image.Image, settings: Any, src_size, convert_to_src_size: Any = None, multipass_crop: Tuple[float, float, float, float] = None):
         (w, h) = self.get_input_size() or image.size
         (iw, ih) = image.size
+
+        if detection_session and not detection_session.tracker:
+            t = self.trackers.get(detection_session.id)
+            if not t:
+                t = tracker.Sort_OH(scene=np.array([iw, ih]))
+                trackerCertainty = settings.get('trackerCertainty')
+                if not isinstance(trackerCertainty, int):
+                    trackerCertainty = .2
+                t.conf_three_frame_certainty = trackerCertainty * 3
+                trackerWindow = settings.get('trackerWindow')
+                if not isinstance(trackerWindow, int):
+                    trackerWindow = 3
+                t.conf_unmatched_history_size = trackerWindow
+                self.trackers[detection_session.id] = t
+            detection_session.tracker = t
+            # conf_trgt = 0.35
+            # conf_objt = 0.75
+            # detection_session.tracker.conf_trgt = conf_trgt
+            # detection_session.tracker.conf_objt = conf_objt
 
         # this a single pass or the second pass. detect once and return results.
         if multipass_crop:
@@ -376,10 +521,60 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
             ret = ret1
             ret['detections'] = dedupe_detections(ret1['detections'] + ret2['detections'], is_same_detection=is_same_detection_middle)
 
+        if detection_session:
+            self.track(detection_session, ret)
+
         if not len(ret['detections']):
             return ret, RawImage(image)
 
         return ret, RawImage(image)
+    
+    def track(self, detection_session: PredictSession, ret: ObjectsDetected):
+        detections = ret['detections']
+        sort_input = []
+        for d in ret['detections']:
+            r: ObjectDetectionResult = d
+            l, t, w, h = r['boundingBox']
+            sort_input.append([l, t, l + w, t + h, r['score']])
+        trackers, unmatched_trckr, unmatched_gts = detection_session.tracker.update(np.array(sort_input), [])
+        for td in trackers:
+            x0, y0, x1, y1, trackID = td[0].item(), td[1].item(
+            ), td[2].item(), td[3].item(), td[4].item()
+            slop = 0
+            obj: ObjectDetectionResult = None
+            ta = (x1 - x0) * (y1 - y0)
+            box = Rectangle(x0, y0, x1, y1)
+            for d in detections:
+                if d.get('id'):
+                    continue
+                ob: ObjectDetectionResult = d
+                dx0, dy0, dw, dh = ob['boundingBox']
+                dx1 = dx0 + dw
+                dy1 = dy0 + dh
+                da = dw * dh
+                area = intersect_area(Rectangle(dx0, dy0, dx1, dy1), box)
+                if not area:
+                    continue
+                # intersect area always gonna be smaller than
+                # the detection or tracker area.
+                # greater numbers, ie approaching 2, is better.
+                dslop = area / ta + area / da
+                if (dslop > slop):
+                    slop = dslop
+                    obj = ob
+            if obj:
+                obj['id'] = str(trackID)
+            # this may happen if tracker predicts something is still in the scene
+            # but was not detected
+            # else:
+            #     print('unresolved tracker')
+        # for d in detections:
+        #     if not d.get('id'):
+        #         # this happens if the tracker is not confident in a new detection yet due
+        #         # to low score or has not been found in enough frames
+        #         if d['className'] == 'person':
+        #             print('untracked %s: %s' % (d['className'], d['score']))
+
 
     def run_detection_crop(self, detection_session: DetectionSession, sample: RawImage, settings: Any, src_size, convert_to_src_size, bounding_box: Tuple[float, float, float, float]) -> ObjectsDetected:
         (ret, _) = self.run_detection_image(detection_session, sample.image, settings, src_size, convert_to_src_size, bounding_box)
@@ -408,7 +603,12 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
         finally:
             gst_buffer.unmap(info)
 
-        return self.run_detection_image(detection_session, image, settings, src_size, convert_to_src_size)
+        try:
+            return self.run_detection_image(detection_session, image, settings, src_size, convert_to_src_size)
+        except:
+            image.close()
+            traceback.print_exc()
+            raise
 
     def create_detection_session(self):
         return PredictSession(start_time=time.time())

@@ -36,6 +36,10 @@ class MediaPlayerState(Enum):
     Paused = "Paused"
     Playing = "Playing"
 
+class PanTiltZoomMovement(Enum):
+    Absolute = "Absolute"
+    Relative = "Relative"
+
 class ScryptedDeviceType(Enum):
     API = "API"
     Automation = "Automation"
@@ -144,11 +148,13 @@ class ScryptedInterface(Enum):
     VideoCamera = "VideoCamera"
     VideoCameraConfiguration = "VideoCameraConfiguration"
     VideoClips = "VideoClips"
+    VideoFrameGenerator = "VideoFrameGenerator"
     VideoRecorder = "VideoRecorder"
 
 class ScryptedMimeTypes(Enum):
     FFmpegInput = "x-scrypted/x-ffmpeg-input"
     FFmpegTranscodeStream = "x-scrypted/x-ffmpeg-transcode-stream"
+    Image = "x-scrypted/x-scrypted-image"
     InsecureLocalUrl = "text/x-insecure-local-uri"
     LocalUrl = "text/x-local-uri"
     MediaObject = "x-scrypted/x-scrypted-media-object"
@@ -161,8 +167,6 @@ class ScryptedMimeTypes(Enum):
     RequestMediaObject = "x-scrypted/x-scrypted-request-media-object"
     RequestMediaStream = "x-scrypted/x-scrypted-request-stream"
     SchemePrefix = "x-scrypted/x-scrypted-scheme-"
-    ScryptedDevice = "x-scrypted/x-scrypted-device"
-    ScryptedDeviceId = "x-scrypted/x-scrypted-device-id"
     Url = "text/x-uri"
 
 class SecuritySystemMode(Enum):
@@ -225,6 +229,12 @@ class AudioStreamOptions(TypedDict):
 class HttpResponseOptions(TypedDict):
     code: float
     headers: object
+    pass
+
+class ImageOptions(TypedDict):
+    crop: Any
+    format: Any | Any | Any
+    resize: Any
     pass
 
 class ObjectDetectionResult(TypedDict):
@@ -419,7 +429,6 @@ class LauncherApplicationInfo(TypedDict):
     pass
 
 class MediaObjectOptions(TypedDict):
-    metadata: Any
     sourceId: str
     pass
 
@@ -465,6 +474,16 @@ class NotifierOptions(TypedDict):
     vibrate: VibratePattern
     pass
 
+class ObjectDetectionGeneratorResult(TypedDict):
+    __json_copy_serialize_children: Any
+    detected: ObjectsDetected
+    videoFrame: VideoFrame
+    pass
+
+class ObjectDetectionGeneratorSession(TypedDict):
+    settings: Any
+    pass
+
 class ObjectDetectionModel(TypedDict):
     classes: list[str]
     inputSize: list[float]
@@ -493,9 +512,18 @@ class ObjectsDetected(TypedDict):
     timestamp: float
     pass
 
+class PanTiltZoomCapabilities(TypedDict):
+    pan: bool
+    tilt: bool
+    zoom: bool
+    pass
+
 class PanTiltZoomCommand(TypedDict):
-    horizontal: Any | Any
-    vertical: Any | Any
+    movement: PanTiltZoomMovement
+    pan: float
+    speed: Any
+    tilt: float
+    zoom: float
     pass
 
 class Position(TypedDict):
@@ -662,6 +690,12 @@ class VideoClipOptions(TypedDict):
     reverseOrder: bool
     startId: str
     startTime: float
+    pass
+
+class VideoFrameGeneratorOptions(TypedDict):
+    crop: Any
+    format: Any | Any | Any
+    resize: Any
     pass
 
 class TamperState(TypedDict):
@@ -886,6 +920,8 @@ class OauthClient:
 class ObjectDetection:
     async def detectObjects(self, mediaObject: MediaObject, session: ObjectDetectionSession = None, callbacks: ObjectDetectionCallbacks = None) -> ObjectsDetected:
         pass
+    async def generateObjectDetections(self, videoFrames: VideoFrame, session: ObjectDetectionGeneratorSession) -> ObjectDetectionGeneratorResult:
+        pass
     async def getDetectionModel(self, settings: Any = None) -> ObjectDetectionModel:
         pass
     pass
@@ -927,7 +963,7 @@ class PM25Sensor:
     pass
 
 class PanTiltZoom:
-    ptzCapabilities: Any
+    ptzCapabilities: PanTiltZoomCapabilities
     async def ptzCommand(self, command: PanTiltZoomCommand) -> None:
         pass
     pass
@@ -1015,6 +1051,8 @@ class ScryptedDevice:
     def listen(self, event: str | EventListenerOptions, callback: EventListener) -> EventListenerRegister:
         pass
     async def probe(self) -> bool:
+        pass
+    async def setMixins(self, mixins: list[str]) -> None:
         pass
     async def setName(self, name: str) -> None:
         pass
@@ -1119,6 +1157,11 @@ class VideoClips:
         pass
     pass
 
+class VideoFrameGenerator:
+    async def generateVideoFrames(self, mediaObject: MediaObject, options: VideoFrameGeneratorOptions = None, filter: Any = None) -> AsyncGenerator:
+        pass
+    pass
+
 class VideoRecorder:
     async def getRecordingStream(self, options: RequestRecordingStreamOptions, recordingStream: MediaObject = None) -> MediaObject:
         pass
@@ -1220,9 +1263,9 @@ class MediaManager:
         pass
     async def createFFmpegMediaObject(self, ffmpegInput: FFmpegInput, options: MediaObjectOptions = None) -> MediaObject:
         pass
-    async def createMediaObject(self, data: Any, mimeType: str, options: MediaObjectOptions = None) -> MediaObject:
+    async def createMediaObject(self, data: Any, mimeType: str, options: Any = None) -> Any:
         pass
-    async def createMediaObjectFromUrl(self, data: str, options: MediaObjectOptions = None) -> MediaObject:
+    async def createMediaObjectFromUrl(self, data: str, options: Any = None) -> MediaObject:
         pass
     async def getFFmpegPath(self) -> str:
         pass
@@ -1543,10 +1586,10 @@ class DeviceState:
         self.setScryptedProperty("humidity", value)
 
     @property
-    def ptzCapabilities(self) -> Any:
+    def ptzCapabilities(self) -> PanTiltZoomCapabilities:
         return self.getScryptedProperty("ptzCapabilities")
     @ptzCapabilities.setter
-    def ptzCapabilities(self, value: Any):
+    def ptzCapabilities(self, value: PanTiltZoomCapabilities):
         self.setScryptedProperty("ptzCapabilities", value)
 
     @property
@@ -1744,6 +1787,7 @@ ScryptedInterfaceDescriptors = {
     "methods": [
       "listen",
       "probe",
+      "setMixins",
       "setName",
       "setRoom",
       "setType"
@@ -2301,6 +2345,7 @@ ScryptedInterfaceDescriptors = {
     "name": "ObjectDetection",
     "methods": [
       "detectObjects",
+      "generateObjectDetections",
       "getDetectionModel"
     ],
     "properties": []
@@ -2350,6 +2395,13 @@ ScryptedInterfaceDescriptors = {
       "getScryptedUserAccessControl"
     ],
     "properties": []
+  },
+  "VideoFrameGenerator": {
+    "name": "VideoFrameGenerator",
+    "methods": [
+      "generateVideoFrames"
+    ],
+    "properties": []
   }
 }
 
@@ -2371,6 +2423,16 @@ class ObjectDetectionCallbacks:
     async def onDetection(self, detection: ObjectsDetected, redetect: Any = None, mediaObject: MediaObject = None) -> bool:
         pass
     async def onDetectionEnded(self, detection: ObjectsDetected) -> None:
+        pass
+    pass
+
+class VideoFrame:
+    height: float
+    timestamp: float
+    width: float
+    async def toBuffer(self, options: ImageOptions = None) -> bytearray:
+        pass
+    async def toImage(self, options: ImageOptions = None) -> Any:
         pass
     pass
 
