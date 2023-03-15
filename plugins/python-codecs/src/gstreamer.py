@@ -16,17 +16,18 @@ except:
 
 class Callback:
     def __init__(self, callback) -> None:
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.get_running_loop()
         self.callback = callback
 
 def createPipelineIterator(pipeline: str):
-    pipeline = '{pipeline} ! appsink name=appsink emit-signals=true sync=false'.format(pipeline=pipeline)
+    pipeline = '{pipeline} ! queue leaky=downstream max-size-buffers=0 ! appsink name=appsink emit-signals=true sync=false max-buffers=-1 drop=true'.format(pipeline=pipeline)
+    print(pipeline)
     gst = Gst.parse_launch(pipeline)
     bus = gst.get_bus()
 
     def on_bus_message(bus, message):
         t = str(message.type)
-        print(t)
+        # print(t)
         if t == str(Gst.MessageType.EOS):
             finish()
         elif t == str(Gst.MessageType.WARNING):
@@ -56,7 +57,7 @@ def createPipelineIterator(pipeline: str):
     bus.add_signal_watch()
 
     finished = concurrent.futures.Future()
-    finished.add_done_callback(lambda _: stopGst())
+    finished.add_done_callback(lambda _: threading.Thread(target=stopGst, name="StopGst").start())
     hasFinished = False
 
     appsink = gst.get_by_name('appsink')
@@ -75,11 +76,15 @@ def createPipelineIterator(pipeline: str):
                 callbackQueue.put(Callback(asyncCallback))
                 sample = await asyncFuture
                 if not sample:
+                    yieldFuture.set_result(None)
                     break
-                yield sample
-                yieldFuture.set_result(None)
+                try:
+                    yield sample
+                finally:
+                    yieldFuture.set_result(None)
         finally:
             finish()
+            print('gstreamer finished')
 
 
     def on_new_sample(sink, preroll):
@@ -95,7 +100,10 @@ def createPipelineIterator(pipeline: str):
             return Gst.FlowReturn.OK
 
         future = asyncio.run_coroutine_threadsafe(callback.callback(sample), loop = callback.loop)
-        future.result()
+        try:
+            future.result()
+        except:
+            pass
         return Gst.FlowReturn.OK
 
     appsink.connect('new-preroll', on_new_sample, True)

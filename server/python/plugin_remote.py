@@ -46,13 +46,19 @@ class SystemManager(scrypted_python.scrypted_sdk.types.SystemManager):
 
 
 class MediaObject(scrypted_python.scrypted_sdk.types.MediaObject):
-    def __init__(self, data, mimeType, sourceId):
-        self.mimeType = mimeType
+    def __init__(self, data, mimeType, options):
         self.data = data
-        setattr(self, '__proxy_props', {
-            'mimeType': mimeType,
-            'sourceId': sourceId,
-        })
+
+        proxyProps = {}
+        setattr(self, rpc.RpcPeer.PROPERTY_PROXY_PROPERTIES, proxyProps)
+
+        options = options or {}
+        options['mimeType'] = mimeType
+
+        for key, value in options.items():
+            if rpc.RpcPeer.isTransportSafe(value):
+                proxyProps[key] = value
+            setattr(self, key, value)
 
     async def getData(self):
         return self.data
@@ -91,9 +97,9 @@ class MediaManager:
 
     async def createMediaObject(self, data: Any, mimeType: str, options: scrypted_python.scrypted_sdk.types.MediaObjectOptions = None) -> scrypted_python.scrypted_sdk.types.MediaObject:
         # return await self.createMediaObject(data, mimetypes, options)
-        return MediaObject(data, mimeType, options.get('sourceId', None) if options else None)
+        return MediaObject(data, mimeType, options)
 
-    async def createMediaObjectFromUrl(self, data: str, options: scrypted_python.scrypted_sdk.types. MediaObjectOptions = None) -> scrypted_python.scrypted_sdk.types.MediaObject:
+    async def createMediaObjectFromUrl(self, data: str, options: scrypted_python.scrypted_sdk.types.MediaObjectOptions = None) -> scrypted_python.scrypted_sdk.types.MediaObject:
         return await self.mediaManager.createMediaObjectFromUrl(data, options)
 
     async def getFFmpegPath(self) -> str:
@@ -304,6 +310,8 @@ class PluginRemote:
                         try:
                             await peerReadLoop()
                         except:
+                            pass
+                        finally:
                             clusterPeers.pop(port)
                     asyncio.run_coroutine_threadsafe(run_loop(), self.loop)
                     return peer
@@ -443,13 +451,31 @@ class PluginRemote:
             def host_fork() -> PluginFork:
                 parent_conn, child_conn = multiprocessing.Pipe()
                 pluginFork = PluginFork()
+                print('new fork')
                 pluginFork.worker = multiprocessing.Process(target=plugin_fork, args=(child_conn,), daemon=True)
                 pluginFork.worker.start()
+
+                def schedule_exit_check():
+                    def exit_check():
+                        if pluginFork.worker.exitcode != None:
+                            pluginFork.worker.join()
+                        else:
+                            schedule_exit_check()
+                    self.loop.call_later(2, exit_check)
+
+                schedule_exit_check()
+
                 async def getFork():
                     fd = os.dup(parent_conn.fileno())
                     forkPeer, readLoop = await rpc_reader.prepare_peer_readloop(self.loop, fd, fd)
                     forkPeer.peerName = 'thread'
-                    asyncio.run_coroutine_threadsafe(readLoop(), loop=self.loop)
+                    async def forkReadLoop():
+                        try:
+                            await readLoop()
+                        except:
+                            print('fork read loop exited')
+                            pass
+                    asyncio.run_coroutine_threadsafe(forkReadLoop(), loop=self.loop)
                     getRemote = await forkPeer.getParam('getRemote')
                     remote: PluginRemote = await getRemote(self.api, self.pluginId, self.hostInfo)
                     await remote.setSystemState(self.systemManager.getSystemState())
@@ -487,7 +513,10 @@ class PluginRemote:
             print('fork failed to start')
             traceback.print_exc()
             raise
-        return await rpc.maybe_await(fork())
+        forked = await rpc.maybe_await(fork())
+        if type(forked) == dict:
+            forked[rpc.RpcPeer.PROPERTY_JSON_COPY_SERIALIZE_CHILDREN] = True
+        return forked
 
     async def setSystemState(self, state):
         self.systemState = state
@@ -593,10 +622,11 @@ def plugin_main(readFd: int, writeFd: int):
         from gi.repository import GLib, Gst
         Gst.init(None)
 
-        worker = threading.Thread(target=main, args=(readFd, writeFd))
+        loop = GLib.MainLoop()
+
+        worker = threading.Thread(target=main, args=(readFd, writeFd), name="asyncio-main")
         worker.start()
 
-        loop = GLib.MainLoop()
         loop.run()
     except:
         main(readFd, writeFd)
