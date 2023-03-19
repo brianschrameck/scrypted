@@ -1,0 +1,47 @@
+{
+   "name": "@scrypted/arlo-local",
+   "version": "0.3.0",
+   "description": "Arlo Local Plugin for Scrypted",
+   "keywords": [
+      "scrypted",
+      "plugin",
+      "arlo",
+      "camera"
+   ],
+   "scripts": {
+      "scrypted-setup-project": "scrypted-setup-project",
+      "prescrypted-setup-project": "scrypted-package-json",
+      "build": "scrypted-webpack",
+      "prepublishOnly": "NODE_ENV=production scrypted-webpack",
+      "prescrypted-vscode-launch": "scrypted-webpack",
+      "scrypted-vscode-launch": "scrypted-deploy-debug",
+      "scrypted-deploy-debug": "scrypted-deploy-debug",
+      "scrypted-debug": "scrypted-debug",
+      "scrypted-deploy": "scrypted-deploy",
+      "scrypted-readme": "scrypted-readme",
+      "scrypted-package-json": "scrypted-package-json"
+   },
+   "scrypted": {
+      "name": "Arlo Local Device Plugin",
+      "type": "DeviceProvider",
+      "interfaces": [
+         "Settings",
+         "DeviceProvider",
+         "HttpRequestHandler"
+      ],
+      "pluginDependencies": [
+         "@scrypted/snapshot",
+         "@scrypted/prebuffer-mixin"
+      ]
+   },
+   "devDependencies": {
+      "@babel/core": "^7.20.12",
+      "@babel/preset-env": "^7.20.2",
+      "@babel/preset-typescript": "^7.18.6",
+      "@scrypted/common": "file:../../common",
+      "@scrypted/sdk": "file:../../sdk"
+   },
+   "dependencies": {
+      "axios": "^1.2.3"
+   }
+}
