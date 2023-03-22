@@ -8,6 +8,7 @@ import platform
 import shutil
 import subprocess
 import threading
+import concurrent.futures
 import time
 import traceback
 import zipfile
@@ -33,7 +34,6 @@ class SystemDeviceState(TypedDict):
     lastEventTime: int
     stateTime: int
     value: any
-
 
 class SystemManager(scrypted_python.scrypted_sdk.types.SystemManager):
     def __init__(self, api: Any, systemState: Mapping[str, Mapping[str, SystemDeviceState]]) -> None:
@@ -269,8 +269,9 @@ class PluginRemote:
         clusterSecret = options['clusterSecret']
 
         async def handleClusterClient(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            rpcTransport = rpc_reader.RpcStreamTransport(reader, writer)
             peer: rpc.RpcPeer
-            peer, peerReadLoop = await rpc_reader.prepare_peer_readloop(self.loop, reader = reader, writer = writer)
+            peer, peerReadLoop = await rpc_reader.prepare_peer_readloop(self.loop, rpcTransport)
             async def connectRPCObject(id: str, secret: str):
                 m = hashlib.sha256()
                 m.update(bytes('%s%s' % (clusterPort, clusterSecret), 'utf8'))
@@ -305,7 +306,8 @@ class PluginRemote:
                 async def connectClusterPeer():
                     reader, writer = await asyncio.open_connection(
                         '127.0.0.1', port)
-                    peer, peerReadLoop = await rpc_reader.prepare_peer_readloop(self.loop, reader = reader, writer = writer)
+                    rpcTransport = rpc_reader.RpcStreamTransport(reader, writer)
+                    peer, peerReadLoop = await rpc_reader.prepare_peer_readloop(self.loop, rpcTransport)
                     async def run_loop():
                         try:
                             await peerReadLoop()
@@ -466,15 +468,24 @@ class PluginRemote:
                 schedule_exit_check()
 
                 async def getFork():
-                    fd = os.dup(parent_conn.fileno())
-                    forkPeer, readLoop = await rpc_reader.prepare_peer_readloop(self.loop, fd, fd)
+                    rpcTransport = rpc_reader.RpcConnectionTransport(parent_conn)
+                    forkPeer, readLoop = await rpc_reader.prepare_peer_readloop(self.loop, rpcTransport)
                     forkPeer.peerName = 'thread'
+
+                    async def updateStats(stats):
+                        allMemoryStats[forkPeer] = stats
+                    forkPeer.params['updateStats'] = updateStats
+
                     async def forkReadLoop():
                         try:
                             await readLoop()
                         except:
+                            # traceback.print_exc()
                             print('fork read loop exited')
-                            pass
+                        finally:
+                            allMemoryStats.pop(forkPeer)
+                            parent_conn.close()
+                            rpcTransport.executor.shutdown()
                     asyncio.run_coroutine_threadsafe(forkReadLoop(), loop=self.loop)
                     getRemote = await forkPeer.getParam('getRemote')
                     remote: PluginRemote = await getRemote(self.api, self.pluginId, self.hostInfo)
@@ -563,13 +574,19 @@ class PluginRemote:
     async def getServicePort(self, name):
         pass
 
-async def plugin_async_main(loop: AbstractEventLoop, readFd: int, writeFd: int):
-    peer, readLoop = await rpc_reader.prepare_peer_readloop(loop, readFd, writeFd)
+
+allMemoryStats = {}
+
+async def plugin_async_main(loop: AbstractEventLoop, rpcTransport: rpc_reader.RpcTransport):
+    peer, readLoop = await rpc_reader.prepare_peer_readloop(loop, rpcTransport)
     peer.params['print'] = print
     peer.params['getRemote'] = lambda api, pluginId, hostInfo: PluginRemote(peer, api, pluginId, hostInfo, loop)
 
     async def get_update_stats():
         update_stats = await peer.getParam('updateStats')
+        if not update_stats:
+            print('host did not provide update_stats')
+            return
 
         def stats_runner():
             ptime = round(time.process_time() * 1000000)
@@ -584,8 +601,12 @@ async def plugin_async_main(loop: AbstractEventLoop, readFd: int, writeFd: int):
                         resource.RUSAGE_SELF).ru_maxrss
                 except:
                     heapTotal = 0
+
+            for _, stats in allMemoryStats.items():
+                ptime += stats['cpu']['user']
+                heapTotal += stats['memoryUsage']['heapTotal']
+
             stats = {
-                'type': 'stats',
                 'cpu': {
                     'user': ptime,
                     'system': 0,
@@ -601,10 +622,14 @@ async def plugin_async_main(loop: AbstractEventLoop, readFd: int, writeFd: int):
 
     asyncio.run_coroutine_threadsafe(get_update_stats(), loop)
 
-    await readLoop()
+    try:
+        await readLoop()
+    finally:
+        if type(rpcTransport) == rpc_reader.RpcConnectionTransport:
+            r: rpc_reader.RpcConnectionTransport = rpcTransport
+            r.executor.shutdown()
 
-
-def main(readFd: int, writeFd: int):
+def main(rpcTransport: rpc_reader.RpcTransport):
     loop = asyncio.new_event_loop()
 
     def gc_runner():
@@ -612,10 +637,12 @@ def main(readFd: int, writeFd: int):
         loop.call_later(10, gc_runner)
     gc_runner()
 
-    loop.run_until_complete(plugin_async_main(loop, readFd, writeFd))
+    loop.run_until_complete(plugin_async_main(loop, rpcTransport))
     loop.close()
 
-def plugin_main(readFd: int, writeFd: int):
+def plugin_main(rpcTransport: rpc_reader.RpcTransport):
+    # gi import will fail on windows (and posisbly elsewhere)
+    # if it does, try starting without it.
     try:
         import gi
         gi.require_version('Gst', '1.0')
@@ -624,17 +651,20 @@ def plugin_main(readFd: int, writeFd: int):
 
         loop = GLib.MainLoop()
 
-        worker = threading.Thread(target=main, args=(readFd, writeFd), name="asyncio-main")
+        worker = threading.Thread(target=main, args=(rpcTransport,), name="asyncio-main")
         worker.start()
 
         loop.run()
+        return
     except:
-        main(readFd, writeFd)
+        pass
+
+    # reattempt without gi outside of the exception handler in case the plugin fails. 
+    main(rpcTransport)
 
 
 def plugin_fork(conn: multiprocessing.connection.Connection):
-    fd = os.dup(conn.fileno())
-    plugin_main(fd, fd)
+    plugin_main(rpc_reader.RpcConnectionTransport(conn))
 
 if __name__ == "__main__":
-    plugin_main(3, 4)
+    plugin_main(rpc_reader.RpcFileTransport(3, 4))
