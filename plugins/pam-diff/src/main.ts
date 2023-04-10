@@ -9,7 +9,7 @@ import { PassThrough, Writable } from 'stream';
 const { mediaManager } = sdk;
 
 const defaultDifference = 9;
-const defaultPercentage = 15;
+const defaultPercentage = 2;
 
 interface PamDiffSession {
     id: string;
@@ -231,7 +231,7 @@ ENDHDR
                     detections.push(
                         {
                             className: 'motion',
-                            score: trigger.percent / 100,
+                            score: 1,
                             boundingBox: [blob.minX, blob.minY, blob.maxX - blob.minX, blob.maxY - blob.minY],
                         }
                     )
@@ -241,7 +241,7 @@ ENDHDR
                 detections.push(
                     {
                         className: 'motion',
-                        score: trigger.percent / 100,
+                        score: 1,
                     }
                 )
             }

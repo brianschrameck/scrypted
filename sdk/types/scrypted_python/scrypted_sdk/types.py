@@ -1,6 +1,9 @@
 from __future__ import annotations
 from enum import Enum
-from typing_extensions import TypedDict
+try:
+    from typing import TypedDict
+except:
+    from typing_extensions import TypedDict
 from typing import Any
 from typing import Callable
 
@@ -14,6 +17,11 @@ class AirQuality(Enum):
     Inferior = "Inferior"
     Poor = "Poor"
     Unknown = "Unknown"
+
+class ChargeState(Enum):
+    Charging = "charging"
+    NotCharging = "not-charging"
+    Trickle = "trickle"
 
 class FanMode(Enum):
     Auto = "Auto"
@@ -85,6 +93,7 @@ class ScryptedInterface(Enum):
     BufferConverter = "BufferConverter"
     CO2Sensor = "CO2Sensor"
     Camera = "Camera"
+    Charger = "Charger"
     ColorSettingHsv = "ColorSettingHsv"
     ColorSettingRgb = "ColorSettingRgb"
     ColorSettingTemperature = "ColorSettingTemperature"
@@ -233,7 +242,7 @@ class HttpResponseOptions(TypedDict):
 
 class ImageOptions(TypedDict):
     crop: Any
-    format: Any | Any | Any | Any
+    format: ImageFormat
     resize: Any
     pass
 
@@ -279,6 +288,9 @@ class VideoStreamOptions(TypedDict):
     minBitrate: float
     profile: str
     width: float
+    pass
+
+class ImageFormat(TypedDict):
     pass
 
 class MediaStreamDestination(TypedDict):
@@ -482,6 +494,7 @@ class ObjectDetectionGeneratorResult(TypedDict):
 
 class ObjectDetectionGeneratorSession(TypedDict):
     settings: Any
+    sourceId: str
     pass
 
 class ObjectDetectionModel(TypedDict):
@@ -497,6 +510,7 @@ class ObjectDetectionSession(TypedDict):
     detectionId: str
     duration: float
     settings: Any
+    sourceId: str
     pass
 
 class ObjectDetectionTypes(TypedDict):
@@ -694,7 +708,7 @@ class VideoClipOptions(TypedDict):
 
 class VideoFrameGeneratorOptions(TypedDict):
     crop: Any
-    format: Any | Any | Any | Any
+    format: ImageFormat
     resize: Any
     pass
 
@@ -743,6 +757,10 @@ class Camera:
         pass
     async def takePicture(self, options: RequestPictureOptions = None) -> MediaObject:
         pass
+    pass
+
+class Charger:
+    chargeState: ChargeState
     pass
 
 class ColorSettingHsv:
@@ -1337,6 +1355,7 @@ class ScryptedInterfaceProperty(Enum):
     lockState = "lockState"
     entryOpen = "entryOpen"
     batteryLevel = "batteryLevel"
+    chargeState = "chargeState"
     online = "online"
     fromMimeType = "fromMimeType"
     toMimeType = "toMimeType"
@@ -1612,6 +1631,13 @@ class DeviceState:
     @batteryLevel.setter
     def batteryLevel(self, value: float):
         self.setScryptedProperty("batteryLevel", value)
+
+    @property
+    def chargeState(self) -> ChargeState:
+        return self.getScryptedProperty("chargeState")
+    @chargeState.setter
+    def chargeState(self, value: ChargeState):
+        self.setScryptedProperty("chargeState", value)
 
     @property
     def online(self) -> bool:
@@ -2092,6 +2118,13 @@ ScryptedInterfaceDescriptors = {
       "batteryLevel"
     ]
   },
+  "Charger": {
+    "name": "Charger",
+    "methods": [],
+    "properties": [
+      "chargeState"
+    ]
+  },
   "Refresh": {
     "name": "Refresh",
     "methods": [
@@ -2427,6 +2460,7 @@ class ObjectDetectionCallbacks:
     pass
 
 class VideoFrame:
+    format: ImageFormat
     height: float
     timestamp: float
     width: float

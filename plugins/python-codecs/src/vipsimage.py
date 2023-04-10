@@ -1,22 +1,15 @@
-import time
-from gst_generator import createPipelineIterator
-import asyncio
-from util import optional_chain
 import scrypted_sdk
 from typing import Any
-from urllib.parse import urlparse
-import pyvips
-import concurrent.futures
-
-# vips is already multithreaded, but needs to be kicked off the python asyncio thread.
-vipsExecutor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="vips")
-
-async def to_thread(f):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(vipsExecutor, f)
+try:
+    import pyvips
+    from pyvips import Image
+except:
+    Image = None
+    pyvips = None
+from thread import to_thread
 
 class VipsImage(scrypted_sdk.VideoFrame):
-    def __init__(self, vipsImage: pyvips.Image) -> None:
+    def __init__(self, vipsImage: Image) -> None:
         super().__init__()
         self.vipsImage = vipsImage
         self.width = vipsImage.width
@@ -37,6 +30,10 @@ class VipsImage(scrypted_sdk.VideoFrame):
                     rgb = vipsImage.vipsImage
                 mem = memoryview(rgb.write_to_memory())
                 return mem
+            return await to_thread(format)
+        elif options['format'] == 'gray':
+            def format():
+                return memoryview(vipsImage.vipsImage.write_to_memory())
             return await to_thread(format)
 
         return await to_thread(lambda: vipsImage.vipsImage.write_to_buffer('.' + options['format']))
@@ -81,6 +78,7 @@ def toVipsImage(vipsImageWrapper: VipsImage, options: scrypted_sdk.ImageOptions 
 
 async def createVipsMediaObject(image: VipsImage):
     ret = await scrypted_sdk.mediaManager.createMediaObject(image, scrypted_sdk.ScryptedMimeTypes.Image.value, {
+        'format': None,
         'width': image.width,
         'height': image.height,
         'toBuffer': lambda options = None: image.toBuffer(options),
@@ -96,7 +94,7 @@ class ImageReader(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.BufferConverter)
         self.toMimeType = scrypted_sdk.ScryptedMimeTypes.Image.value
 
     async def convert(self, data: Any, fromMimeType: str, toMimeType: str, options: scrypted_sdk.MediaObjectOptions = None) -> Any:
-        vips = pyvips.Image.new_from_buffer(data, '')
+        vips = Image.new_from_buffer(data, '')
         return await createVipsMediaObject(VipsImage(vips))
 
 class ImageWriter(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.BufferConverter):
@@ -110,3 +108,6 @@ class ImageWriter(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.BufferConverter)
         return await data.toBuffer({
             format: 'jpg',
         })
+
+def new_from_memory(data, width: int, height: int, bands: int):
+    return Image.new_from_memory(data, width, height, bands, pyvips.BandFormat.UCHAR)

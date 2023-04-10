@@ -59,7 +59,11 @@ RUN apt-get -y install \
 
 # armv7l does not have wheels for any of these
 # and compile times would forever, if it works at all.
-RUN if [ "$(uname -m)" = "armv7l" ]; \
+# furthermore, it's possible to run 32bit docker on 64bit arm,
+# which causes weird behavior in python which looks at the arch version
+# which still reports 64bit, even if running in 32bit docker.
+# this scenario is not supported and will be reported at runtime.
+RUN if [ "$(uname -m)" != "x86_64" ]; \
     then \
         apt-get -y install \
         python3-matplotlib \
@@ -73,7 +77,7 @@ RUN if [ "$(uname -m)" = "armv7l" ]; \
 RUN python3 -m pip install --upgrade pip
 # pyvips is broken on x86 due to mismatch ffi
 # https://stackoverflow.com/questions/62658237/it-seems-that-the-version-of-the-libffi-library-seen-at-runtime-is-different-fro
-RUN pip install --force-reinstall --no-binary :all: cffi
+RUN python3 -m pip install --force-reinstall --no-binary :all: cffi
 RUN python3 -m pip install aiofiles debugpy typing_extensions psutil
 
 ################################################################
@@ -88,6 +92,11 @@ ENV SCRYPTED_DOCKER_SERVE="true"
 ENV SCRYPTED_CAN_RESTART="true"
 ENV SCRYPTED_VOLUME="/server/volume"
 ENV SCRYPTED_INSTALL_PATH="/server"
+
+# changing this forces pip and npm to perform reinstalls.
+# if this base image changes, this version must be updated.
+ENV SCRYPTED_BASE_VERSION=20230329
+ENV SCRYPTED_DOCKER_FLAVOR=full
 
 ################################################################
 # End section generated from template/Dockerfile.full.footer

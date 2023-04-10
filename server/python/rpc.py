@@ -1,8 +1,13 @@
-from asyncio.futures import Future
-from typing import Any, Callable, Dict, Mapping, List
-import traceback
 import inspect
-from typing_extensions import TypedDict
+import traceback
+from asyncio.futures import Future
+from typing import Any, Callable, Dict, List, Mapping
+
+try:
+    from typing import TypedDict
+except:
+    from typing_extensions import TypedDict
+
 import weakref
 
 jsonSerializable = set()
@@ -77,6 +82,14 @@ class RpcProxy(object):
                 if e.name == 'StopAsyncIteration':
                     raise StopAsyncIteration()
                 raise
+        raise Exception('RpcProxy is not an async iterable')
+
+    async def aclose(self):
+        if self.__dict__[RpcPeer.PROPERTY_PROXY_PROPERTIES] and 'Symbol(Symbol.asyncIterator)' in self.__dict__[RpcPeer.PROPERTY_PROXY_PROPERTIES]:
+            try:
+                return await RpcProxyMethod(self, self.__dict__[RpcPeer.PROPERTY_PROXY_PROPERTIES]['Symbol(Symbol.asyncIterator)']['return'])()
+            except Exception:
+                return
         raise Exception('RpcProxy is not an async iterable')
 
     def __getattr__(self, name):

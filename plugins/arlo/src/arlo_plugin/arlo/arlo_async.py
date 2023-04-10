@@ -29,7 +29,8 @@ from .sse_stream_async import EventStream
 from .logging import logger
 
 # Import all of the other stuff.
-from datetime import datetime
+from datetime import datetime, timedelta
+from cachetools import cached, TTLCache
 
 import asyncio
 import sys
@@ -382,6 +383,33 @@ class Arlo(object):
             self.HandleEvents(basestation, resource, [('is', 'motionDetected')], callbackwrapper)
         )
 
+    def SubscribeToAudioEvents(self, basestation, camera, callback):
+        """
+        Use this method to subscribe to audio events. You must provide a callback function which will get called once per audio event.
+
+        The callback function should have the following signature:
+        def callback(self, event)
+
+        This is an example of handling a specific event, in reality, you'd probably want to write a callback for HandleEvents()
+        that has a big switch statement in it to handle all the various events Arlo produces.
+
+        Returns the Task object that contains the subscription loop.
+        """
+        resource = f"cameras/{camera.get('deviceId')}"
+
+        def callbackwrapper(self, event):
+            properties = event.get('properties', {})
+            stop = None
+            if 'audioDetected' in properties:
+                stop = callback(properties['audioDetected'])
+            if not stop:
+                return None
+            return stop
+
+        return asyncio.get_event_loop().create_task(
+            self.HandleEvents(basestation, resource, [('is', 'audioDetected')], callbackwrapper)
+        )
+
     def SubscribeToBatteryEvents(self, basestation, camera, callback):
         """
         Use this method to subscribe to battery events. You must provide a callback function which will get called once per battery event.
@@ -710,7 +738,20 @@ class Arlo(object):
             callback,
         )
 
-    def SirenOn(self, basestation):
+    def SirenOn(self, basestation, camera=None):
+        if camera is not None:
+            resource = f"siren/{camera.get('deviceId')}"
+            return self.Notify(basestation, {
+                "action": "set",
+                "resource": resource,
+                "publishResponse": True,
+                "properties": {
+                    "sirenState": "on",
+                    "duration": 300,
+                    "volume": 8,
+                    "pattern": "alarm"
+                }
+            })
         return self.Notify(basestation, {
             "action": "set",
             "resource": "siren",
@@ -723,7 +764,20 @@ class Arlo(object):
             }
         })
 
-    def SirenOff(self, basestation):
+    def SirenOff(self, basestation, camera=None):
+        if camera is not None:
+            resource = f"siren/{camera.get('deviceId')}"
+            return self.Notify(basestation, {
+                "action": "set",
+                "resource": resource,
+                "publishResponse": True,
+                "properties": {
+                    "sirenState": "off",
+                    "duration": 300,
+                    "volume": 8,
+                    "pattern": "alarm"
+                }
+            })
         return self.Notify(basestation, {
             "action": "set",
             "resource": "siren",
@@ -735,3 +789,113 @@ class Arlo(object):
                 "pattern": "alarm"
             }
         })
+
+    def SpotlightOn(self, basestation, camera):
+        resource = f"cameras/{camera.get('deviceId')}"
+        return self.Notify(basestation, {
+            "action": "set",
+            "resource": resource,
+            "publishResponse": True,
+            "properties": {
+                "spotlight": {
+                    "enabled": True,
+                },
+            },
+        })
+
+    def SpotlightOff(self, basestation, camera):
+        resource = f"cameras/{camera.get('deviceId')}"
+        return self.Notify(basestation, {
+            "action": "set",
+            "resource": resource,
+            "publishResponse": True,
+            "properties": {
+                "spotlight": {
+                    "enabled": False,
+                },
+            },
+        })
+
+    def FloodlightOn(self, basestation, camera):
+        resource = f"cameras/{camera.get('deviceId')}"
+        return self.Notify(basestation, {
+            "action": "set",
+            "resource": resource,
+            "publishResponse": True,
+            "properties": {
+                "floodlight": {
+                    "on": True,
+                },
+            },
+        })
+
+    def FloodlightOff(self, basestation, camera):
+        resource = f"cameras/{camera.get('deviceId')}"
+        return self.Notify(basestation, {
+            "action": "set",
+            "resource": resource,
+            "publishResponse": True,
+            "properties": {
+                "floodlight": {
+                    "on": False,
+                },
+            },
+        })
+
+    def GetLibrary(self, device, from_date: datetime, to_date: datetime):
+        """
+        This call returns the following:
+        presignedContentUrl is a link to the actual video in Amazon AWS.
+        presignedThumbnailUrl is a link to the thumbnail .jpg of the actual video in Amazon AWS.
+        [
+          {
+            "mediaDurationSecond": 30,
+            "contentType": "video/mp4",
+            "name": "XXXXXXXXXXXXX",
+            "presignedContentUrl": "https://arlos3-prod-z2.s3.amazonaws.com/XXXXXXX_XXXX_XXXX_XXXX_XXXXXXXXXXXXX/XXX-XXXXXXX/XXXXXXXXXXXXX/recordings/XXXXXXXXXXXXX.mp4?AWSAccessKeyId=XXXXXXXXXXXXXXXXXXXX&Expires=1472968703&Signature=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "lastModified": 1472881430181,
+            "localCreatedDate": XXXXXXXXXXXXX,
+            "presignedThumbnailUrl": "https://arlos3-prod-z2.s3.amazonaws.com/XXXXXXX_XXXX_XXXX_XXXX_XXXXXXXXXXXXX/XXX-XXXXXXX/XXXXXXXXXXXXX/recordings/XXXXXXXXXXXXX_thumb.jpg?AWSAccessKeyId=XXXXXXXXXXXXXXXXXXXX&Expires=1472968703&Signature=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "reason": "motionRecord",
+            "deviceId": "XXXXXXXXXXXXX",
+            "createdBy": "XXXXXXXXXXXXX",
+            "createdDate": "20160903",
+            "timeZone": "America/Chicago",
+            "ownerId": "XXX-XXXXXXX",
+            "utcCreatedDate": XXXXXXXXXXXXX,
+            "currentState": "new",
+            "mediaDuration": "00:00:30"
+          }
+        ]
+        """
+        # give the query range a bit of buffer
+        from_date_internal = from_date - timedelta(days=1)
+        to_date_internal = to_date + timedelta(days=1)
+
+        return [
+            result for result in
+            self._getLibraryCached(from_date_internal.strftime("%Y%m%d"), to_date_internal.strftime("%Y%m%d"))
+            if result["deviceId"] == device["deviceId"]
+            and datetime.fromtimestamp(int(result["name"]) / 1000.0) <= to_date
+            and datetime.fromtimestamp(int(result["name"]) / 1000.0) >= from_date
+        ]
+
+    @cached(cache=TTLCache(maxsize=512, ttl=60))
+    def _getLibraryCached(self, from_date: str, to_date: str):
+        logger.debug(f"Library cache miss for {from_date}, {to_date}")
+        return self.request.post(
+            f'https://{self.BASE_URL}/hmsweb/users/library',
+            {
+                'dateFrom': from_date,
+                'dateTo': to_date
+            }
+        )
+
+    def GetSmartFeatures(self, device) -> dict:
+        smart_features = self._getSmartFeaturesCached()
+        key = f"{device['owner']['ownerId']}_{device['deviceId']}"
+        return smart_features["features"].get(key, {})
+
+    @cached(cache=TTLCache(maxsize=1, ttl=60))
+    def _getSmartFeaturesCached(self) -> dict:
+        return self.request.get(f'https://{self.BASE_URL}/hmsweb/users/subscription/smart/features')

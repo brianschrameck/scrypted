@@ -2,8 +2,8 @@ import time
 from gst_generator import createPipelineIterator
 import scrypted_sdk
 from typing import Any
-import pyvips
-from vips import createVipsMediaObject, VipsImage
+import vipsimage
+import pilimage
 
 av = None
 try:
@@ -27,6 +27,8 @@ async def generateVideoFramesLibav(mediaObject: scrypted_sdk.MediaObject, option
     # stream.codec_context.options['-analyzeduration'] = '0'
     # stream.codec_context.options['-probesize'] = '500000'
 
+    gray = options and options.get('format') == 'gray'
+
     start = 0
     try:
         for idx, frame in enumerate(container.decode(stream)):
@@ -38,14 +40,37 @@ async def generateVideoFramesLibav(mediaObject: scrypted_sdk.MediaObject, option
                 # print('too slow, skipping frame')
                 continue
             # print(frame)
-            vips = pyvips.Image.new_from_array(frame.to_ndarray(format='rgb24'))
-            vipsImage = VipsImage(vips)
-            try:
-                mo = await createVipsMediaObject(VipsImage(vips))
-                yield mo
-            finally:
-                vipsImage.vipsImage.invalidate()
-                vipsImage.vipsImage = None
-
+            if vipsimage.pyvips:
+                if gray and frame.format.name.startswith('yuv') and frame.planes and len(frame.planes):
+                    vips = vipsimage.new_from_memory(memoryview(frame.planes[0]), frame.width, frame.height, 1)
+                elif gray:
+                    vips = vipsimage.pyvips.Image.new_from_array(frame.to_ndarray(format='gray'))
+                else:
+                    vips = vipsimage.pyvips.Image.new_from_array(frame.to_ndarray(format='rgb24'))
+                vipsImage = vipsimage.VipsImage(vips)
+                try:
+                    mo = await vipsimage.createVipsMediaObject(vipsImage)
+                    yield mo
+                finally:
+                    vipsImage.vipsImage = None
+                    vips.invalidate()
+            else:
+                if gray and frame.format.name.startswith('yuv') and frame.planes and len(frame.planes):
+                    pil = pilimage.new_from_memory(memoryview(frame.planes[0]), frame.width, frame.height, 1)
+                elif gray:
+                    rgb = frame.to_image()
+                    try:
+                        pil = rgb.convert('L')
+                    finally:
+                        rgb.close()
+                else:
+                    pil = frame.to_image()
+                pilImage = pilimage.PILImage(pil)
+                try:
+                    mo = await pilimage.createPILMediaObject(pilImage)
+                    yield mo
+                finally:
+                    pilImage.pilImage = None
+                    pil.close()
     finally:
         container.close()

@@ -30,15 +30,17 @@ export function startPeriodicGarbageCollection() {
 }
 
 export interface RpcMessage {
-    type: string;
+    type: 'apply' | 'result' | 'finalize' | 'param';
 }
 
-interface RpcParam extends RpcMessage {
+export interface RpcParam extends RpcMessage {
+    type: 'param';
     id: string;
     param: string;
 }
 
-interface RpcApply extends RpcMessage {
+export interface RpcApply extends RpcMessage {
+    type: 'apply';
     id: string | undefined;
     proxyId: string;
     args: any[];
@@ -46,7 +48,8 @@ interface RpcApply extends RpcMessage {
     oneway?: boolean;
 }
 
-interface RpcResult extends RpcMessage {
+export interface RpcResult extends RpcMessage {
+    type: 'result';
     id: string;
     // TODO 3/2/2023
     // deprecate these properties from rpc protocol. treat error results like any other result
@@ -63,6 +66,12 @@ interface RpcResult extends RpcMessage {
     result?: any;
 }
 
+interface RpcFinalize extends RpcMessage {
+    type: 'finalize';
+    __local_proxy_id: string;
+    __local_proxy_finalizer_id: string | undefined;
+}
+
 interface RpcRemoteProxyValue {
     __remote_proxy_id: string | undefined;
     __remote_proxy_finalizer_id: string | undefined;
@@ -74,11 +83,6 @@ interface RpcRemoteProxyValue {
 
 interface RpcLocalProxyValue {
     __local_proxy_id: string;
-}
-
-interface RpcFinalize extends RpcMessage {
-    __local_proxy_id: string;
-    __local_proxy_finalizer_id: string | undefined;
 }
 
 interface Deferred {

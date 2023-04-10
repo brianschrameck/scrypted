@@ -1,10 +1,13 @@
+import traceback
 import asyncio
 import scrypted_sdk
 from scrypted_sdk import Setting, SettingValue
 from typing import Any, List
 import gstreamer
 import libav
-import vips
+import vipsimage
+import pilimage
+import time
 
 Gst = None
 try:
@@ -110,32 +113,52 @@ class PythonCodecs(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.DeviceProvider)
             return GstreamerGenerator('gstreamer')
         if nativeId == 'libav':
             return LibavGenerator('libav')
-        if nativeId == 'reader':
-            return vips.ImageReader('reader')
-        if nativeId == 'writer':
-            return vips.ImageWriter('writer')
+        
+        if vipsimage.pyvips:
+            if nativeId == 'reader':
+                return vipsimage.ImageReader('reader')
+            if nativeId == 'writer':
+                return vipsimage.ImageWriter('writer')
+        else:
+            if nativeId == 'reader':
+                return pilimage.ImageReader('reader')
+            if nativeId == 'writer':
+                return pilimage.ImageWriter('writer')
 
 def create_scrypted_plugin():
     return PythonCodecs()
 
 class CodecFork:
     async def generateVideoFramesGstreamer(self, mediaObject: scrypted_sdk.MediaObject, options: scrypted_sdk.VideoFrameGeneratorOptions = None, filter: Any = None, h264Decoder: str = None) -> scrypted_sdk.VideoFrame:
+        start = time.time()
         try:
             async for data in gstreamer.generateVideoFramesGstreamer(mediaObject, options, filter, h264Decoder):
                 yield data
+        except Exception as e:
+            traceback.print_exc()
+            raise
         finally:
+            print('gstreamer finished after %s' % (time.time() - start))
             import os
             os._exit(os.EX_OK)
             pass
 
     async def generateVideoFramesLibav(self, mediaObject: scrypted_sdk.MediaObject, options: scrypted_sdk.VideoFrameGeneratorOptions = None, filter: Any = None) -> scrypted_sdk.VideoFrame:
+        start = time.time()
         try:
             async for data in libav.generateVideoFramesLibav(mediaObject, options, filter):
                 yield data
+        except Exception as e:
+            traceback.print_exc()
+            raise
         finally:
-            import os
-            os._exit(os.EX_OK)
-            pass
+            print('libav finished after %s' % (time.time() - start))
+            import sys
+            if sys.platform == 'win32':
+                sys.exit()
+            else:
+                import os
+                os._exit(os.EX_OK)
 
 
 async def fork():

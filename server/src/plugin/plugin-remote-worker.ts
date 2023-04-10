@@ -12,7 +12,7 @@ import { createDuplexRpcPeer } from '../rpc-serializer';
 import { MediaManagerImpl } from './media';
 import { PluginAPI, PluginAPIProxy, PluginRemote, PluginRemoteLoadZipOptions } from './plugin-api';
 import { prepareConsoles } from './plugin-console';
-import { installOptionalDependencies } from './plugin-npm-dependencies';
+import { getPluginNodePath, installOptionalDependencies } from './plugin-npm-dependencies';
 import { attachPluginRemote, DeviceManagerImpl, PluginReader, setupPluginRemote } from './plugin-remote';
 import { PluginStats, startStatsUpdater } from './plugin-remote-stats';
 import { createREPLServer } from './plugin-repl';
@@ -22,7 +22,11 @@ const { link } = require('linkfs');
 
 const serverVersion = require('../../package.json').version;
 
-export function startPluginRemote(mainFilename: string, pluginId: string, peerSend: (message: RpcMessage, reject?: (e: Error) => void, serializationContext?: any) => void) {
+export interface StartPluginRemoteOptions {
+    onClusterPeer(peer: RpcPeer): void;
+}
+
+export function startPluginRemote(mainFilename: string, pluginId: string, peerSend: (message: RpcMessage, reject?: (e: Error) => void, serializationContext?: any) => void, startPluginRemoteOptions?: StartPluginRemoteOptions) {
     const peer = new RpcPeer('unknown', 'host', peerSend);
 
     let systemManager: SystemManager;
@@ -38,12 +42,6 @@ export function startPluginRemote(mainFilename: string, pluginId: string, peerSe
     }
 
     const { getDeviceConsole, getMixinConsole } = prepareConsoles(() => peer.selfName, () => systemManager, () => deviceManager, getPlugins);
-
-    // process.cpuUsage is for the entire process.
-    // process.memoryUsage is per thread.
-    const allMemoryStats = new Map<NodeThreadWorker, NodeJS.MemoryUsage>();
-
-    peer.getParam('updateStats').then(updateStats => startStatsUpdater(allMemoryStats, updateStats));
 
     let replPort: Promise<number>;
 
@@ -81,6 +79,7 @@ export function startPluginRemote(mainFilename: string, pluginId: string, peerSe
             const { clusterId, clusterSecret } = zipOptions;
             const clusterRpcServer = net.createServer(client => {
                 const clusterPeer = createDuplexRpcPeer(peer.selfName, 'cluster-client', client, client);
+                startPluginRemoteOptions?.onClusterPeer?.(clusterPeer);
                 const portSecret = crypto.createHash('sha256').update(`${clusterPort}${clusterSecret}`).digest().toString('hex');
                 clusterPeer.params['connectRPCObject'] = async (id: string, secret: string) => {
                     if (secret !== portSecret)
@@ -114,7 +113,7 @@ export function startPluginRemote(mainFilename: string, pluginId: string, peerSe
                 let clusterPeerPromise = clusterPeers.get(port);
                 if (!clusterPeerPromise) {
                     clusterPeerPromise = (async () => {
-                        const socket = net.connect(port);
+                        const socket = net.connect(port, '127.0.0.1');
                         socket.on('close', () => clusterPeers.delete(port));
 
                         try {
@@ -181,6 +180,8 @@ export function startPluginRemote(mainFilename: string, pluginId: string, peerSe
 
             const pluginConsole = getPluginConsole?.();
             params.console = pluginConsole;
+            const pnp = getPluginNodePath(pluginId);
+            pluginConsole?.log('node modules', pnp);
             params.require = (name: string) => {
                 if (name === 'fakefs' || (name === 'fs' && !packageJson.scrypted.realfs)) {
                     return volume;
@@ -188,8 +189,14 @@ export function startPluginRemote(mainFilename: string, pluginId: string, peerSe
                 if (name === 'realfs') {
                     return require('fs');
                 }
-                const module = require(name);
-                return module;
+                try {
+                    const module = require(name);
+                    return module;
+                }
+                catch (e) {
+                    const c = path.join(pnp, 'node_modules', name);
+                    return require(c);
+                }
             };
             // const window: any = {};
             const exports: any = {};
@@ -232,6 +239,12 @@ export function startPluginRemote(mainFilename: string, pluginId: string, peerSe
             };
 
             await installOptionalDependencies(getPluginConsole(), packageJson);
+
+            // process.cpuUsage is for the entire process.
+            // process.memoryUsage is per thread.
+            const allMemoryStats = new Map<NodeThreadWorker, NodeJS.MemoryUsage>();
+            // start the stats updater/watchdog after installation has finished, as that may take some time.
+            peer.getParam('updateStats').then(updateStats => startStatsUpdater(allMemoryStats, updateStats));
 
             const main = pluginReader('main.nodejs.js');
             pluginReader = undefined;

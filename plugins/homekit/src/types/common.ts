@@ -1,14 +1,21 @@
-import sdk, { Fan, AirQuality, AirQualitySensor, CO2Sensor, NOXSensor, PM10Sensor, PM25Sensor, ScryptedDevice, ScryptedInterface, VOCSensor, FanMode, OnOff } from "@scrypted/sdk";
+import sdk, { Fan, AirQuality, AirQualitySensor, CO2Sensor, NOXSensor, PM10Sensor, PM25Sensor, ScryptedDevice, ScryptedInterface, VOCSensor, FanMode, OnOff, DeviceProvider, ScryptedDeviceType } from "@scrypted/sdk";
 import { bindCharacteristic } from "../common";
 import { Accessory, Characteristic, CharacteristicEventTypes, Service, uuid } from '../hap';
 import type { HomeKitPlugin } from "../main";
+import { getService as getOnOffService } from "./onoff-base";
 
-const { deviceManager } = sdk;
+const { deviceManager, systemManager } = sdk;
 
 export function makeAccessory(device: ScryptedDevice, homekitPlugin: HomeKitPlugin, suffix?: string): Accessory {
     const mixinStorage = deviceManager.getMixinStorage(device.id, homekitPlugin.nativeId);
     const resetId = mixinStorage.getItem('resetAccessory') || '';
     return new Accessory(device.name, uuid.generate(resetId + device.id + (suffix ? '-' + suffix : '')));
+}
+
+export function getChildDevices(device: ScryptedDevice & DeviceProvider): ScryptedDevice[] {
+    const ids = Object.keys(systemManager.getSystemState());
+    const allDevices = ids.map(id => systemManager.getDeviceById(id));
+    return allDevices.filter(d => d.providerId == device.id);
 }
 
 export function addAirQualitySensor(device: ScryptedDevice & AirQualitySensor & PM10Sensor & PM25Sensor & VOCSensor & NOXSensor, accessory: Accessory): Service {
@@ -34,7 +41,7 @@ export function addAirQualitySensor(device: ScryptedDevice & AirQualitySensor & 
     const airQualityService = accessory.addService(Service.AirQualitySensor);
     bindCharacteristic(device, ScryptedInterface.AirQualitySensor, airQualityService, Characteristic.AirQuality,
         () => airQualityToHomekit(device.airQuality));
-    
+
     if (device.interfaces.includes(ScryptedInterface.PM10Sensor)) {
         bindCharacteristic(device, ScryptedInterface.PM10Sensor, airQualityService, Characteristic.PM10Density,
             () => device.pm10Density || 0);
@@ -157,4 +164,33 @@ export function addFan(device: ScryptedDevice & Fan & OnOff, accessory: Accessor
     }
 
     return service;
+}
+
+/*
+ * mergeOnOffDevicesByType looks for the specified type of child devices under the
+ * given device provider and merges them as switches to the accessory represented
+ * by the device provider.
+ *
+ * Returns the services created as well as all of the child OnOff devices which have
+ * been merged.
+ */
+export function mergeOnOffDevicesByType(device: ScryptedDevice & DeviceProvider, accessory: Accessory, type: ScryptedDeviceType): { services: Service[], devices: (ScryptedDevice & OnOff)[] } {
+    if (!device.interfaces.includes(ScryptedInterface.DeviceProvider))
+        return undefined;
+
+    const children = getChildDevices(device);
+    const mergedDevices = [];
+    const services = children.map((child: ScryptedDevice & OnOff) => {
+        if (child.type !== type || !child.interfaces.includes(ScryptedInterface.OnOff))
+            return undefined;
+
+        const onOffService = getOnOffService(child, accessory, Service.Switch)
+        mergedDevices.push(child);
+        return onOffService;
+    });
+
+    return {
+        services: services.filter(service => !!service),
+        devices: mergedDevices,
+    };
 }
