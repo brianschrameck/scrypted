@@ -1255,23 +1255,17 @@ export interface ObjectDetectionResult extends BoundingBoxResult {
   name?: string;
   score: number;
   resources?: VideoResource;
+  /**
+   * Movement history will track the first/last time this object was moving.
+   */
+  movement?: ObjectDetectionHistory & { moving?: boolean; };
 }
 export interface ObjectsDetected {
-  /**
-   * Object detection session state. Will be true if processing video, until
-   * the video ends or is timed out.
-   */
-  running?: boolean;
   detections?: ObjectDetectionResult[];
   /**
    * The id for the detection session.
    */
   detectionId?: string;
-  /**
-   * The id for this specific event/frame within a detection video session.
-   * Will be undefined for single image detections.
-   */
-  eventId?: any;
   inputDimensions?: [number, number],
   timestamp: number;
   resources?: VideoResource;
@@ -1306,8 +1300,6 @@ export interface ObjectDetectionGeneratorSession {
   sourceId?: string;
 }
 export interface ObjectDetectionSession extends ObjectDetectionGeneratorSession {
-  detectionId?: string;
-  duration?: number;
 }
 export interface ObjectDetectionModel extends ObjectDetectionTypes {
   name: string;
@@ -1315,6 +1307,7 @@ export interface ObjectDetectionModel extends ObjectDetectionTypes {
   inputFormat?: 'gray' | 'rgb' | 'rgba';
   settings: Setting[];
   triggerClasses?: string[];
+  prebuffer?: number;
 }
 export interface ObjectDetectionCallbacks {
   onDetection(detection: ObjectsDetected, redetect?: (boundingBox: [number, number, number, number]) => Promise<ObjectDetectionResult[]>, mediaObject?: MediaObject): Promise<boolean>;
@@ -1322,7 +1315,7 @@ export interface ObjectDetectionCallbacks {
 }
 export interface ObjectDetectionGeneratorResult {
   __json_copy_serialize_children: true,
-  videoFrame: VideoFrame;
+  videoFrame: VideoFrame & MediaObject;
   detected: ObjectsDetected;
 }
 /**
@@ -1330,8 +1323,8 @@ export interface ObjectDetectionGeneratorResult {
  * E.g. TensorFlow, OpenCV, or a Coral TPU.
  */
 export interface ObjectDetection {
-  generateObjectDetections(videoFrames: AsyncGenerator<VideoFrame>, session: ObjectDetectionGeneratorSession): Promise<AsyncGenerator<ObjectDetectionGeneratorResult>>;
-  detectObjects(mediaObject: MediaObject, session?: ObjectDetectionSession, callbacks?: ObjectDetectionCallbacks): Promise<ObjectsDetected>;
+  generateObjectDetections(videoFrames: AsyncGenerator<VideoFrame & MediaObject>, session: ObjectDetectionGeneratorSession): Promise<AsyncGenerator<ObjectDetectionGeneratorResult>>;
+  detectObjects(mediaObject: MediaObject, session?: ObjectDetectionSession): Promise<ObjectsDetected>;
   getDetectionModel(settings?: { [key: string]: any }): Promise<ObjectDetectionModel>;
 }
 export type ImageFormat = 'gray' | 'rgba' | 'rgb' | 'jpg';
@@ -1362,8 +1355,12 @@ export interface Image {
 }
 export interface VideoFrame extends Image {
   timestamp: number;
+  queued: number;
+  flush(count?: number): Promise<void>;
 }
 export interface VideoFrameGeneratorOptions extends ImageOptions {
+  queue?: number;
+  fps?: number;
 }
 export interface VideoFrameGenerator {
   generateVideoFrames(mediaObject: MediaObject, options?: VideoFrameGeneratorOptions, filter?: (videoFrame: VideoFrame & MediaObject) => Promise<boolean>): Promise<AsyncGenerator<VideoFrame & MediaObject>>;
@@ -1688,6 +1685,16 @@ export interface SystemManager {
   getDeviceById<T>(id: string): ScryptedDevice & T;
 
   /**
+   * Find a Scrypted device by pluginId and optionally the nativeId.
+   */
+  getDeviceById(pluginId: string, nativeId?: ScryptedNativeId): ScryptedDevice;
+
+  /**
+   * Find a Scrypted device by pluginId and optionally the nativeId.
+   */
+  getDeviceById<T>(pluginId: string, nativeId?: ScryptedNativeId): ScryptedDevice & T;
+
+  /**
    * Find a Scrypted device by name.
    */
   getDeviceByName(name: string): ScryptedDevice;
@@ -1829,6 +1836,8 @@ export enum MediaPlayerState {
   Buffering = "Buffering",
 }
 export type SettingValue = undefined | null | string | number | boolean | string[] | number[];
+export type Point = [number, number];
+export type ClipPath = Point[];
 export interface Setting {
   key?: string;
   title?: string;
@@ -1836,7 +1845,7 @@ export interface Setting {
   subgroup?: string;
   description?: string;
   placeholder?: string;
-  type?: 'string' | 'password' | 'number' | 'boolean' | 'device' | 'integer' | 'button' | 'clippath' | 'interface' | 'qrcode' | 'textarea';
+  type?: 'string' | 'password' | 'number' | 'boolean' | 'device' | 'integer' | 'button' | 'clippath' | 'interface' | 'qrcode' | 'textarea' | 'date' | 'time' | 'datetime';
   /**
    * The range of allowed numbers, if any, when the type is 'number'.
    */
