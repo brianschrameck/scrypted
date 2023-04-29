@@ -1,18 +1,35 @@
-import { ensurePluginVolume } from "./plugin-volume";
-import fs from 'fs';
 import child_process from 'child_process';
-import path from 'path';
 import { once } from 'events';
-import process from 'process';
+import fs from 'fs';
 import mkdirp from "mkdirp";
-import semver from 'semver';
 import os from 'os';
+import path from 'path';
+import process from 'process';
 import rimraf from "rimraf";
+import semver from 'semver';
+import { ensurePluginVolume } from "./plugin-volume";
+
+export function defaultNpmExec(args: string[], options: child_process.SpawnOptions) {
+    let npm = 'npm';
+    if (os.platform() === 'win32')
+        npm += '.cmd';
+    const cp = child_process.spawn(npm,  args, options);
+    return cp;
+}
+
+let npmExecFunction = defaultNpmExec;
+export function setNpmExecFunction(f: typeof npmExecFunction) {
+    npmExecFunction = f;
+}
 
 export function getPluginNodePath(name: string) {
     const pluginVolume = ensurePluginVolume(name);
     const nodeMajorVersion = semver.parse(process.version).major;
-    const nodePrefix = path.join(pluginVolume, `node${nodeMajorVersion}-${process.platform}-${process.arch}`);
+    let nodeVersionedDirectory = `node${nodeMajorVersion}-${process.platform}-${process.arch}`;
+    const scryptedBase = process.env.SCRYPTED_BASE_VERSION;
+    if (scryptedBase)
+        nodeVersionedDirectory += '-' + scryptedBase;
+    const nodePrefix = path.join(pluginVolume, nodeVersionedDirectory);
     return nodePrefix;
 }
 
@@ -52,10 +69,7 @@ export async function installOptionalDependencies(console: Console, packageJson:
         mkdirp.sync(nodePrefix);
         fs.writeFileSync(packageJsonPath, JSON.stringify(reduced));
 
-        let npm = 'npm';
-        if (os.platform() === 'win32')
-            npm += '.cmd';
-        const cp = child_process.spawn(npm, ['--prefix', nodePrefix, 'install'], {
+        const cp = npmExecFunction(['--prefix', nodePrefix, 'install'], {
             cwd: nodePrefix,
             stdio: 'inherit',
         });

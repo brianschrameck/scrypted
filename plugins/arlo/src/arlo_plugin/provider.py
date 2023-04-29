@@ -6,27 +6,31 @@ import logging
 import re
 import requests
 import traceback
+from typing import List
 
 import scrypted_sdk
 from scrypted_sdk import ScryptedDeviceBase
-from scrypted_sdk.types import Settings, DeviceProvider, DeviceDiscovery, ScryptedInterface, ScryptedDeviceType
+from scrypted_sdk.types import Setting, SettingValue, Settings, DeviceProvider, ScryptedInterface
 
 from .arlo import Arlo
 from .arlo.arlo_async import change_stream_class
 from .arlo.logging import logger as arlo_lib_logger
+from .logging import ScryptedDeviceLoggerMixin
+from .util import BackgroundTaskMixin, async_print_exception_guard
 from .camera import ArloCamera
 from .doorbell import ArloDoorbell
-from .logging import ScryptedDeviceLoggerMixin 
-from .util import BackgroundTaskMixin
+from .basestation import ArloBasestation
+from .base import ArloDeviceBase
 
 
-class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery, ScryptedDeviceLoggerMixin, BackgroundTaskMixin):
+class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, ScryptedDeviceLoggerMixin, BackgroundTaskMixin):
     arlo_cameras = None
     arlo_basestations = None
     _arlo_mfa_code = None
     scrypted_devices = None
     _arlo = None
     _arlo_mfa_complete_auth = None
+    device_discovery_lock: asyncio.Lock = None
 
     plugin_verbosity_choices = {
         "Normal": logging.INFO,
@@ -37,7 +41,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
 
     mfa_strategy_choices = ["Manual", "IMAP"]
 
-    def __init__(self, nativeId=None):
+    def __init__(self, nativeId: str = None) -> None:
         super().__init__(nativeId=nativeId)
         self.logger_name = "provider"
 
@@ -47,6 +51,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         self.imap = None
         self.imap_signal = None
         self.imap_skip_emails = None
+        self.device_discovery_lock = asyncio.Lock()
 
         self.propagate_verbosity()
         self.propagate_transport()
@@ -60,28 +65,28 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         asyncio.get_event_loop().call_soon(load, self)
         self.create_task(self.onDeviceEvent(ScryptedInterface.Settings.value, None))
 
-    def print(self, *args, **kwargs):
+    def print(self, *args, **kwargs) -> None:
         """Overrides the print() from ScryptedDeviceBase to avoid double-printing in the main plugin console."""
         print(*args, **kwargs)
 
     @property
-    def arlo_username(self):
+    def arlo_username(self) -> str:
         return self.storage.getItem("arlo_username")
 
     @property
-    def arlo_password(self):
+    def arlo_password(self) -> str:
         return self.storage.getItem("arlo_password")
 
     @property
-    def arlo_auth_headers(self):
+    def arlo_auth_headers(self) -> str:
         return self.storage.getItem("arlo_auth_headers")
 
     @property
-    def arlo_user_id(self):
+    def arlo_user_id(self) -> str:
         return self.storage.getItem("arlo_user_id")
 
     @property
-    def arlo_transport(self):
+    def arlo_transport(self) -> str:
         transport = self.storage.getItem("arlo_transport")
         if transport is None or transport not in ArloProvider.arlo_transport_choices:
             transport = "SSE"
@@ -89,7 +94,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         return transport
 
     @property
-    def plugin_verbosity(self):
+    def plugin_verbosity(self) -> str:
         verbosity = self.storage.getItem("plugin_verbosity")
         if verbosity is None or verbosity not in ArloProvider.plugin_verbosity_choices:
             verbosity = "Normal"
@@ -97,7 +102,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         return verbosity
 
     @property
-    def mfa_strategy(self):
+    def mfa_strategy(self) -> str:
         strategy = self.storage.getItem("mfa_strategy")
         if strategy is None or strategy not in ArloProvider.mfa_strategy_choices:
             strategy = "Manual"
@@ -105,7 +110,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         return strategy
 
     @property
-    def refresh_interval(self):
+    def refresh_interval(self) -> int:
         interval = self.storage.getItem("refresh_interval")
         if interval is None:
             interval = 90
@@ -113,11 +118,11 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         return int(interval)
 
     @property
-    def imap_mfa_host(self):
+    def imap_mfa_host(self) -> str:
         return self.storage.getItem("imap_mfa_host")
 
     @property
-    def imap_mfa_port(self):
+    def imap_mfa_port(self) -> int:
         port = self.storage.getItem("imap_mfa_port")
         if port is None:
             port = 993
@@ -125,23 +130,23 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         return int(port)
 
     @property
-    def imap_mfa_username(self):
+    def imap_mfa_username(self) -> str:
         return self.storage.getItem("imap_mfa_username")
 
     @property
-    def imap_mfa_password(self):
+    def imap_mfa_password(self) -> str:
         return self.storage.getItem("imap_mfa_password")
 
     @property
-    def imap_mfa_interval(self):
+    def imap_mfa_interval(self) -> int:
         interval = self.storage.getItem("imap_mfa_interval")
         if interval is None:
-            interval = 7 
+            interval = 7
             self.storage.setItem("imap_mfa_interval", interval)
         return int(interval)
 
     @property
-    def arlo(self):
+    def arlo(self) -> Arlo:
         if self._arlo is not None:
             if self._arlo_mfa_complete_auth is not None:
                 if self._arlo_mfa_code == "":
@@ -149,7 +154,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
 
                 self.logger.info("Completing Arlo MFA...")
                 self._arlo_mfa_complete_auth(self._arlo_mfa_code)
-                self._arlo_mfa_complete_auth = None 
+                self._arlo_mfa_complete_auth = None
                 self._arlo_mfa_code = None
                 self.logger.info("Arlo MFA done")
 
@@ -162,7 +167,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
 
         if not self.arlo_username or not self.arlo_password:
             return None
-            
+
         self.logger.info("Trying to initialize Arlo client...")
         try:
             self._arlo = Arlo(self.arlo_username, self.arlo_password)
@@ -183,15 +188,12 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
             self._arlo_mfa_code = None
             return None
 
-    async def do_arlo_setup(self):
+    async def do_arlo_setup(self) -> None:
         try:
-            await self.discoverDevices()
+            await self.discover_devices()
             await self.arlo.Subscribe([
                 (self.arlo_basestations[camera["parentId"]], camera) for camera in self.arlo_cameras.values()
             ])
-
-            for nativeId in self.arlo_cameras.keys():
-                await self.getDevice(nativeId)
 
             self.arlo.event_stream.set_refresh_interval(self.refresh_interval)
         except requests.exceptions.HTTPError as e:
@@ -204,7 +206,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         except Exception as e:
             traceback.print_exc()
 
-    def invalidate_arlo_client(self):
+    def invalidate_arlo_client(self) -> None:
         if self._arlo is not None:
             self._arlo.Unsubscribe()
         self._arlo = None
@@ -213,10 +215,10 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         self.storage.setItem("arlo_auth_headers", "")
         self.storage.setItem("arlo_user_id", "")
 
-    def get_current_log_level(self):
+    def get_current_log_level(self) -> int:
         return ArloProvider.plugin_verbosity_choices[self.plugin_verbosity]
 
-    def propagate_verbosity(self):
+    def propagate_verbosity(self) -> None:
         self.print(f"Setting plugin verbosity to {self.plugin_verbosity}")
         log_level = self.get_current_log_level()
         self.logger.setLevel(log_level)
@@ -224,11 +226,11 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
             device.logger.setLevel(log_level)
         arlo_lib_logger.setLevel(log_level)
 
-    def propagate_transport(self):
+    def propagate_transport(self) -> None:
         self.print(f"Setting plugin transport to {self.arlo_transport}")
         change_stream_class(self.arlo_transport)
 
-    def initialize_imap(self):
+    def initialize_imap(self) -> None:
         if not self.imap_mfa_host or not self.imap_mfa_port or \
             not self.imap_mfa_username or not self.imap_mfa_password or \
             not self.imap_mfa_interval:
@@ -245,7 +247,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
             res, _ = self.imap.select(mailbox="INBOX", readonly=True)
             if res.lower() != "ok":
                 raise Exception(f"IMAP failed to fetch INBOX: {res}")
-            
+
             # fetch existing arlo emails so we skip them going forward
             res, self.imap_skip_emails = self.imap.search(None, "FROM", "do_not_reply@arlo.com")
             if res.lower() != "ok":
@@ -258,14 +260,14 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
             self.imap_signal = asyncio.Queue()
             self.create_task(self.imap_relogin_loop())
 
-    def exit_imap(self):
+    def exit_imap(self) -> None:
         if self.imap_signal:
             self.imap_signal.put_nowait(None)
         self.imap_signal = None
         self.imap_skip_emails = None
         self.imap = None
 
-    async def imap_relogin_loop(self):
+    async def imap_relogin_loop(self) -> None:
         imap_signal = self.imap_signal
         self.logger.info(f"Starting IMAP refresh loop {id(imap_signal)}")
         while True:
@@ -368,7 +370,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
                 self.logger.info(f"Exiting IMAP refresh loop {id(imap_signal)}")
                 return
 
-    async def getSettings(self):
+    async def getSettings(self) -> List[Setting]:
         results = [
             {
                 "group": "General",
@@ -447,7 +449,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
                     "value": self.imap_mfa_interval,
                 }
             ])
-        
+
         results.extend([
             {
                 "group": "General",
@@ -469,17 +471,17 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
             {
                 "group": "General",
                 "key": "plugin_verbosity",
-                "title": "Plugin Verbosity",
-                "description": "Select the verbosity of this plugin. 'Verbose' will show debugging messages, "
-                               "including events received from connected Arlo cameras.",
-                "value": self.plugin_verbosity,
-                "choices": sorted(self.plugin_verbosity_choices.keys()),
+                "title": "Verbose Logging",
+                "description": "Enable this option to show debug messages, including events received from connected Arlo cameras.",
+                "value": self.plugin_verbosity == "Verbose",
+                "type": "boolean",
             },
         ])
 
         return results
 
-    async def putSetting(self, key, value):
+    @async_print_exception_guard
+    async def putSetting(self, key: str, value: SettingValue) -> None:
         if not self.validate_setting(key, value):
             await self.onDeviceEvent(ScryptedInterface.Settings.value, None)
             return
@@ -490,13 +492,14 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         elif key == "force_reauth":
             # force arlo client to be invalidated and reloaded
             self.invalidate_arlo_client()
+        elif key == "plugin_verbosity":
+            self.storage.setItem(key, "Verbose" if value == "true" or value == True else "Normal")
+            self.propagate_verbosity()
+            skip_arlo_client = True
         else:
             self.storage.setItem(key, value)
 
-            if key == "plugin_verbosity":
-                self.propagate_verbosity()
-                skip_arlo_client = True
-            elif key == "arlo_transport":
+            if key == "arlo_transport":
                 self.propagate_transport()
                 # force arlo client to be invalidated and reloaded, but
                 # keep any mfa codes
@@ -525,7 +528,7 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
             _ = self.arlo
         await self.onDeviceEvent(ScryptedInterface.Settings.value, None)
 
-    def validate_setting(self, key, val):
+    def validate_setting(self, key: str, val: SettingValue) -> bool:
         if key == "refresh_interval":
             try:
                 val = int(val)
@@ -555,7 +558,12 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
                 return False
         return True
 
-    async def discoverDevices(self, duration=0):
+    @async_print_exception_guard
+    async def discover_devices(self) -> None:
+        async with self.device_discovery_lock:
+            return await self.discover_devices_impl()
+
+    async def discover_devices_impl(self) -> None:
         if not self.arlo:
             raise Exception("Arlo client not connected, cannot discover devices")
 
@@ -564,70 +572,126 @@ class ArloProvider(ScryptedDeviceBase, Settings, DeviceProvider, DeviceDiscovery
         self.arlo_basestations = {}
         self.scrypted_devices = {}
 
+        camera_devices = []
+        provider_to_device_map = {}
+
         basestations = self.arlo.GetDevices(['basestation', 'siren'])
         for basestation in basestations:
-            self.arlo_basestations[basestation["deviceId"]] = basestation
+            nativeId = basestation["deviceId"]
+            self.logger.debug(f"Adding {nativeId}")
+
+            if nativeId in self.arlo_basestations:
+                self.logger.info(f"Skipping basestation {nativeId} ({basestation['modelId']}) as it has already been added")
+                continue
+            self.arlo_basestations[nativeId] = basestation
+
+            device = await self.getDevice_impl(nativeId)
+            scrypted_interfaces = device.get_applicable_interfaces()
+            manifest = device.get_device_manifest()
+            self.logger.debug(f"Interfaces for {nativeId} ({basestation['modelId']}): {scrypted_interfaces}")
+
+            # for basestations, we want to add them to the top level DeviceProvider
+            provider_to_device_map.setdefault(None, []).append(manifest)
+
+            # we want to trickle discover them so they are added without deleting all existing
+            # root level devices - this is for backward compatibility
+            await scrypted_sdk.deviceManager.onDeviceDiscovered(manifest)
+
+            # add any builtin child devices and trickle discover them
+            child_manifests = device.get_builtin_child_device_manifests()
+            for child_manifest in child_manifests:
+                await scrypted_sdk.deviceManager.onDeviceDiscovered(child_manifest)
+                provider_to_device_map.setdefault(child_manifest["providerNativeId"], []).append(child_manifest)
+
         self.logger.info(f"Discovered {len(basestations)} basestations")
 
-        devices = []
         cameras = self.arlo.GetDevices(['camera', "arloq", "arloqs", "doorbell"])
         for camera in cameras:
+            nativeId = camera["deviceId"]
+            self.logger.debug(f"Adding {nativeId}")
+
             if camera["deviceId"] != camera["parentId"] and camera["parentId"] not in self.arlo_basestations:
-                self.logger.info(f"Skipping camera {camera['deviceId']} because its basestation was not found")
+                self.logger.info(f"Skipping camera {camera['deviceId']} ({camera['modelId']}) because its basestation was not found")
                 continue
 
-            if camera["deviceId"] == camera["parentId"]:
-                self.arlo_basestations[camera["deviceId"]] = camera
-
-            nativeId = camera["deviceId"]
+            if nativeId in self.arlo_cameras:
+                self.logger.info(f"Skipping camera {nativeId} ({camera['modelId']}) as it has already been added")
+                continue
             self.arlo_cameras[nativeId] = camera
 
-            scrypted_interfaces = (await self.getDevice(nativeId)).get_applicable_interfaces()
+            if camera["deviceId"] == camera["parentId"]:
+                # these are standalone cameras with no basestation, so they act as their
+                # own basestation
+                self.arlo_basestations[camera["deviceId"]] = camera
+
+            device = await self.getDevice_impl(nativeId)
+            scrypted_interfaces = device.get_applicable_interfaces()
+            manifest = device.get_device_manifest()
             self.logger.debug(f"Interfaces for {nativeId} ({camera['modelId']}): {scrypted_interfaces}")
 
-            device = {
-                "info": {
-                    "model": f"{camera['properties']['modelId']} ({camera['properties'].get('hwVersion', '')})".strip(),
-                    "manufacturer": "Arlo",
-                    "firmware": camera.get("firmwareVersion"),
-                    "serialNumber": camera["deviceId"],
-                },
-                "nativeId": camera["deviceId"],
-                "name": camera["deviceName"],
-                "interfaces": scrypted_interfaces,
-                "type": ScryptedDeviceType.Camera.value,
-                "providerNativeId": self.nativeId,
-            }
+            if camera["deviceId"] == camera["parentId"]:
+                provider_to_device_map.setdefault(None, []).append(manifest)
+            else:
+                provider_to_device_map.setdefault(camera["parentId"], []).append(manifest)
 
-            devices.append(device)
+            # trickle discover this camera so it exists for later steps
+            await scrypted_sdk.deviceManager.onDeviceDiscovered(manifest)
 
-        await scrypted_sdk.deviceManager.onDevicesChanged({
-            "devices": devices,
-        })
+            # add any builtin child devices and trickle discover them
+            child_manifests = device.get_builtin_child_device_manifests()
+            for child_manifest in child_manifests:
+                await scrypted_sdk.deviceManager.onDeviceDiscovered(child_manifest)
+                provider_to_device_map.setdefault(child_manifest["providerNativeId"], []).append(child_manifest)
 
-        if len(cameras) != len(devices):
-            self.logger.info(f"Discovered {len(cameras)} cameras, but only {len(devices)} are usable")
+            camera_devices.append(manifest)
+
+        if len(cameras) != len(camera_devices):
+            self.logger.info(f"Discovered {len(cameras)} cameras, but only {len(camera_devices)} are usable")
         else:
             self.logger.info(f"Discovered {len(cameras)} cameras")
 
-    async def getDevice(self, nativeId):
+        for provider_id in provider_to_device_map.keys():
+            if provider_id is None:
+                continue
+            await scrypted_sdk.deviceManager.onDevicesChanged({
+                "devices": provider_to_device_map[provider_id],
+                "providerNativeId": provider_id,
+            })
+
+        # ensure devices at the root match all that was discovered
+        await scrypted_sdk.deviceManager.onDevicesChanged({
+            "devices": provider_to_device_map[None]
+        })
+
+    async def getDevice(self, nativeId: str) -> ArloDeviceBase:
+        async with self.device_discovery_lock:
+            return await self.getDevice_impl(nativeId)
+
+    async def getDevice_impl(self, nativeId: str) -> ArloDeviceBase:
         ret = self.scrypted_devices.get(nativeId, None)
         if ret is None:
-            ret = self.create_camera(nativeId)
+            ret = self.create_device(nativeId)
             if ret is not None:
                 self.scrypted_devices[nativeId] = ret
         return ret
 
-    def create_camera(self, nativeId):
-        if nativeId not in self.arlo_cameras:
+    def create_device(self, nativeId: str) -> ArloDeviceBase:
+        if nativeId not in self.arlo_cameras and nativeId not in self.arlo_basestations:
+            self.logger.warning(f"Cannot create device for nativeId {nativeId}, maybe it hasn't been loaded yet?")
             return None
-        arlo_camera = self.arlo_cameras[nativeId]
 
-        if arlo_camera["parentId"] not in self.arlo_basestations:
+        arlo_device = self.arlo_cameras.get(nativeId)
+        if not arlo_device:
+            # this is a basestation, so build the basestation object
+            arlo_device = self.arlo_basestations[nativeId]
+            return ArloBasestation(nativeId, arlo_device, self)
+
+        if arlo_device["parentId"] not in self.arlo_basestations:
+            self.logger.warning(f"Cannot create camera with nativeId {nativeId} when {arlo_device['parentId']} is not a valid basestation")
             return None
-        arlo_basestation = self.arlo_basestations[arlo_camera["parentId"]]
+        arlo_basestation = self.arlo_basestations[arlo_device["parentId"]]
 
-        if arlo_camera["deviceType"] == "doorbell":
-            return ArloDoorbell(nativeId, arlo_camera, arlo_basestation, self)
+        if arlo_device["deviceType"] == "doorbell":
+            return ArloDoorbell(nativeId, arlo_device, arlo_basestation, self)
         else:
-            return ArloCamera(nativeId, arlo_camera, arlo_basestation, self)
+            return ArloCamera(nativeId, arlo_device, arlo_basestation, self)

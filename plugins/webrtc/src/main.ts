@@ -115,7 +115,8 @@ class WebRTCMixin extends SettingsMixinDeviceBase<RTCSignalingClient & VideoCame
         const device = systemManager.getDeviceById<VideoCamera & Intercom>(this.id);
         const hasIntercom = this.mixinDeviceInterfaces.includes(ScryptedInterface.Intercom);
 
-        const mo = await sdk.mediaManager.createMediaObject(device, ScryptedMimeTypes.ScryptedDevice, {
+        const requestMediaStream: RequestMediaStream = async options => device.getVideoStream(options);
+        const mo = await mediaManager.createMediaObject(requestMediaStream, ScryptedMimeTypes.RequestMediaStream, {
             sourceId: device.id,
         });
 
@@ -126,7 +127,8 @@ class WebRTCMixin extends SettingsMixinDeviceBase<RTCSignalingClient & VideoCame
             mo,
             this.plugin.storageSettings.values.maximumCompatibilityMode,
             this.plugin.getRTCConfiguration(),
-            await this.plugin.getWeriftConfiguration(),
+            await this.plugin.getWeriftConfiguration(options?.disableTurn),
+            options?.requiresAnswer === true ? false : true,
         );
     }
 
@@ -196,12 +198,6 @@ export class WebRTCPlugin extends AutoenableMixinProvider implements DeviceCreat
             type: 'boolean',
             defaultValue: true,
         },
-        useIPv6: {
-            title: 'Use IPv6',
-            description: 'Use IPv6 addresses when connecting. This is disabled by default due to commonly misconfigured IPv6 local networks.',
-            type: 'boolean',
-            defaultValue: false,
-        },
         activeConnections: {
             readonly: true,
             title: "Current Open Connections",
@@ -222,6 +218,10 @@ export class WebRTCPlugin extends AutoenableMixinProvider implements DeviceCreat
             type: 'textarea',
             description: "RTCConfiguration that can be used to specify custom TURN and STUN servers. https://gist.github.com/koush/631d38ac8647a86baaac7b22d863f010",
         },
+        debugLog: {
+            title: 'Debug Log',
+            type: 'boolean',
+        }
     });
     bridge: WebRTCBridge;
     activeConnections = 0;
@@ -409,7 +409,7 @@ export class WebRTCPlugin extends AutoenableMixinProvider implements DeviceCreat
         };
     }
 
-    async getWeriftConfiguration(): Promise<Partial<PeerConfig>> {
+    async getWeriftConfiguration(disableTurn?: boolean): Promise<Partial<PeerConfig>> {
         let ret: Partial<PeerConfig>;
         if (this.storageSettings.values.weriftConfiguration) {
             try {
@@ -420,7 +420,7 @@ export class WebRTCPlugin extends AutoenableMixinProvider implements DeviceCreat
             }
         }
 
-        const iceServers = this.storageSettings.values.useTurnServer
+        const iceServers = this.storageSettings.values.useTurnServer && !disableTurn
             ? [weriftStunServer, weriftTurnServer]
             : [weriftStunServer];
 
@@ -443,7 +443,6 @@ export class WebRTCPlugin extends AutoenableMixinProvider implements DeviceCreat
         }
 
         return {
-            iceUseIpv6: false,
             iceServers,
             iceInterfaceAddresses,
             ...ret,

@@ -40,6 +40,9 @@ import { ServiceControl } from './services/service-control';
 import { UsersService } from './services/users';
 import { getState, ScryptedStateManager, setState } from './state';
 import crypto from 'crypto';
+import { RuntimeWorker, RuntimeWorkerOptions } from './plugin/runtime/runtime-worker';
+import { PythonRuntimeWorker } from './plugin/runtime/python-worker';
+import { NodeForkWorker } from './plugin/runtime/node-fork-worker';
 
 interface DeviceProxyPair {
     handler: PluginDeviceProxyHandler;
@@ -53,6 +56,8 @@ interface HttpPluginData {
     pluginHost: PluginHost;
     pluginDevice: PluginDevice
 }
+
+export type RuntimeHost = (mainFilename: string, pluginId: string, options: RuntimeWorkerOptions) => RuntimeWorker;
 
 export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
     clusterId = crypto.randomBytes(3).toString('hex');
@@ -83,11 +88,17 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
     corsControl = new CORSControl(this);
     addressSettings = new AddressSettings(this);
     usersService = new UsersService(this);
+    pluginHosts = new Map<string, RuntimeHost>();
 
-    constructor(datastore: Level, insecure: http.Server, secure: https.Server, app: express.Application) {
+    constructor(public mainFilename: string, datastore: Level, insecure: http.Server, secure: https.Server, app: express.Application) {
         super(app);
         this.datastore = datastore;
         this.app = app;
+        // ensure that all the users are loaded from the db.
+        this.usersService.getAllUsers();
+
+        this.pluginHosts.set('python', (_, pluginId, options) => new PythonRuntimeWorker(pluginId, options));
+        this.pluginHosts.set('node', (mainFilename, pluginId, options) => new NodeForkWorker(mainFilename, pluginId, options));
 
         app.disable('x-powered-by');
 
@@ -711,6 +722,7 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
 
         this.invalidatePluginDevice(device._id);
         delete this.pluginDevices[device._id];
+        delete this.devices[device._id];
         await this.datastore.remove(device);
         this.stateManager.removeDevice(device._id);
 

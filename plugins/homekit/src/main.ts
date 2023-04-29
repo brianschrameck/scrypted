@@ -6,18 +6,53 @@ import { getAddressOverride } from "./address-override";
 import { maybeAddBatteryService } from './battery';
 import { CameraMixin, canCameraMixin } from './camera-mixin';
 import { SnapshotThrottle, supportedTypes } from './common';
-import { Accessory, Bridge, Categories, Characteristic, ControllerStorage, MDNSAdvertiser, PublishInfo, Service } from './hap';
-import { createHAPUsernameStorageSettingsDict, getHAPUUID, getRandomPort as createRandomPort, initializeHapStorage, logConnections, typeToCategory } from './hap-utils';
+import { HAPStorage, Accessory, Bridge, Categories, Characteristic, ControllerStorage, MDNSAdvertiser, PublishInfo, Service } from './hap';
+import { createHAPUsernameStorageSettingsDict, getHAPUUID, getRandomPort as createRandomPort, logConnections, typeToCategory } from './hap-utils';
 import { HomekitMixin, HOMEKIT_MIXIN } from './homekit-mixin';
 import { addAccessoryDeviceInfo } from './info';
 import { randomPinCode } from './pincode';
 import './types';
 import { VIDEO_CLIPS_NATIVE_ID } from './types/camera/camera-recording-files';
+import { reorderDevicesByProvider } from './util';
 import { VideoClipsMixinProvider } from './video-clips-provider';
+
+const hapStorage: Storage = {
+    get length() {
+        return localStorage.length;
+    },
+    clear: function (): void {
+        return localStorage.clear();
+    },
+    key: function (index: number): string {
+        return localStorage.key(index);
+    },
+    removeItem: function (key: string): void {
+        return localStorage.removeItem(key);
+    },
+    getItem(key: string): any {
+        const data = localStorage.getItem(key);
+        if (!data)
+            return;
+        return JSON.parse(data);
+    },
+    setItem(key: string, value: any) {
+        localStorage.setItem(key, JSON.stringify(value));
+    },
+    setItemSync(key: string, value: any) {
+        localStorage.setItem(key, JSON.stringify(value));
+    },
+    removeItemSync(key: string) {
+        localStorage.removeItem(key);
+    },
+    persistSync() {
+    }
+}
+HAPStorage.storage = () => {
+    return hapStorage;
+}
 
 const { systemManager, deviceManager } = sdk;
 
-initializeHapStorage();
 const includeToken = 4;
 
 export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, Settings, DeviceProvider {
@@ -75,6 +110,7 @@ export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, 
             description: 'The last home hub to request a recording. Internally used to determine if a streaming request is coming from remote wifi.',
         },
     });
+    mergedDevices = new Set<string>();
 
     constructor() {
         super();
@@ -137,6 +173,7 @@ export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, 
 
     async start() {
         this.log.clearAlerts();
+        this.mergedDevices = new Set<string>();
 
         let defaultIncluded: any;
         try {
@@ -147,10 +184,27 @@ export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, 
         }
 
         const plugins = await systemManager.getComponent('plugins');
-
         const accessoryIds = new Set<string>();
+        const deviceIds = Object.keys(systemManager.getSystemState());
 
-        for (const id of Object.keys(systemManager.getSystemState())) {
+        // when creating accessories in order, some DeviceProviders may merge in
+        // their child devices (and report back which devices are merged via
+        // this.mergedDevices)
+        // we need to ensure that the iteration processes DeviceProviders before
+        // their children, so a reordering is necessary
+        const reorderedDeviceIds = reorderDevicesByProvider(deviceIds);
+
+        // safety checks in case something went wrong
+        if (deviceIds.length !== reorderedDeviceIds.length) {
+            throw Error(`error in device reordering, expected ${deviceIds.length} devices but only got ${reorderedDeviceIds.length}!`);
+        }
+        const uniqueDeviceIds = new Set<string>(deviceIds);
+        const uniqueReorderedIds = new Set<string>(reorderedDeviceIds);
+        if (uniqueDeviceIds.size !== uniqueReorderedIds.size) {
+            throw Error(`error in device reordering, expected ${uniqueDeviceIds.size} unique devices but only got ${uniqueReorderedIds.size} entries!`);
+        }
+
+        for (const id of reorderedDeviceIds) {
             const device = systemManager.getDeviceById<Online>(id);
             const supportedType = supportedTypes[device.type];
             if (!supportedType?.probe(device))
@@ -159,6 +213,9 @@ export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, 
             try {
                 const mixins = (device.mixins || []).slice();
                 if (!mixins.includes(this.id)) {
+                    // don't sync this by default, as it's solely for automations
+                    if (device.type === ScryptedDeviceType.Notifier)
+                        continue;
                     if (defaultIncluded[device.id] === includeToken)
                         continue;
                     mixins.push(this.id);
@@ -169,6 +226,11 @@ export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, 
             catch (e) {
                 console.error('error while checking device if syncable', e);
                 this.log.a('Error while checking device if syncable. See Console.');
+                continue;
+            }
+
+            if (this.mergedDevices.has(device.id)) {
+                this.console.log(`${device.name} was merged into an existing Homekit accessory and will not be exposed independently`)
                 continue;
             }
 
@@ -294,9 +356,10 @@ export class HomeKitPlugin extends ScryptedDeviceBase implements MixinProvider, 
             bind,
         };
 
-        this.bridge.publish(publishInfo, true);
-        this.storageSettings.values.qrCode = this.bridge.setupURI();
-        logConnections(this.console, this.bridge, this.seenConnections);
+        this.bridge.publish(publishInfo, true).then(() => {
+            this.storageSettings.values.qrCode = this.bridge.setupURI();
+            logConnections(this.console, this.bridge, this.seenConnections);
+        });
 
         systemManager.listen(async (eventSource, eventDetails, eventData) => {
             if (eventDetails.eventInterface !== ScryptedInterface.ScryptedDevice)

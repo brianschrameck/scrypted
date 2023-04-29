@@ -1,8 +1,13 @@
-from asyncio.futures import Future
-from typing import Any, Callable, Dict, Mapping, List
-import traceback
 import inspect
-from typing_extensions import TypedDict
+import traceback
+from asyncio.futures import Future
+from typing import Any, Callable, Dict, List, Mapping
+
+try:
+    from typing import TypedDict
+except:
+    from typing_extensions import TypedDict
+
 import weakref
 
 jsonSerializable = set()
@@ -29,6 +34,8 @@ class RPCResultError(Exception):
     def __init__(self, caught, message):
         self.caught = caught
         self.message = message
+        self.name = None
+        self.stack = None
 
 
 class RpcSerializer:
@@ -77,6 +84,14 @@ class RpcProxy(object):
                 raise
         raise Exception('RpcProxy is not an async iterable')
 
+    async def aclose(self):
+        if self.__dict__[RpcPeer.PROPERTY_PROXY_PROPERTIES] and 'Symbol(Symbol.asyncIterator)' in self.__dict__[RpcPeer.PROPERTY_PROXY_PROPERTIES]:
+            try:
+                return await RpcProxyMethod(self, self.__dict__[RpcPeer.PROPERTY_PROXY_PROPERTIES]['Symbol(Symbol.asyncIterator)']['return'])()
+            except Exception:
+                return
+        raise Exception('RpcProxy is not an async iterable')
+
     def __getattr__(self, name):
         if name == '__proxy_finalizer_id':
             return self.dict['__proxy_entry']['finalizerId']
@@ -119,8 +134,19 @@ class RpcPeer:
         self.nameDeserializerMap: Mapping[str, RpcSerializer] = {}
         self.onProxySerialization: Callable[[Any, str], Any] = None
         self.killed = False
+        self.tags = {}
 
     def __apply__(self, proxyId: str, oneWayMethods: List[str], method: str, args: list):
+        oneway = oneWayMethods and method in oneWayMethods
+
+        if self.killed:
+            future = Future()
+            if oneway:
+                future.set_result(None)
+                return future
+            future.set_exception(RPCResultError(None, 'RpcPeer has been killed (apply) ' + str(method)))
+            return future
+
         serializationContext: Dict = {}
         serializedArgs = []
         for arg in args:
@@ -134,7 +160,7 @@ class RpcPeer:
             'method': method,
         }
 
-        if oneWayMethods and method in oneWayMethods:
+        if oneway:
             rpcApply['oneway'] = True
             self.send(rpcApply, None, serializationContext)
             future = Future()
@@ -472,12 +498,13 @@ class RpcPeer:
             pass
 
     async def createPendingResult(self, cb: Callable[[str, Callable[[Exception], None]], None]):
-        # if (Object.isFrozen(this.pendingResults))
-        #     return Promise.reject(new RPCResultError('RpcPeer has been killed'));
+        future = Future()
+        if self.killed:
+            future.set_exception(RPCResultError(None, 'RpcPeer has been killed (createPendingResult)'))
+            return future
 
         id = str(self.idCounter)
         self.idCounter = self.idCounter + 1
-        future = Future()
         self.pendingResults[id] = future
         await cb(id, lambda e: future.set_exception(RPCResultError(e, None)))
         return await future

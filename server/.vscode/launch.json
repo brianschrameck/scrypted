@@ -13,10 +13,9 @@
                 "<node_internals>/**"
             ],
             "preLaunchTask": "npm: build",
-            "program": "${workspaceFolder}/dist/scrypted-main.js",
+            "program": "${workspaceFolder}/bin/scrypted-serve",
             "runtimeArgs": [
                 "--trace-warnings",
-                "--expose-gc",
                 "--nolazy",
             ],
             "sourceMaps": true,
@@ -28,7 +27,9 @@
                 "${workspaceFolder}/**/*.js"
             ],
             "env": {
-                "SCRYPTED_PYTHON_PATH": "python3.9",
+                // force usage of system python because brew python is 3.11
+                // which has no wheels for coreml tools or tflite-runtime
+                "SCRYPTED_PYTHON_PATH": "/usr/bin/python3",
                 // "SCRYPTED_SHARED_WORKER": "true",
                 // "SCRYPTED_DISABLE_AUTHENTICATION": "true",
                 // "DEBUG": "*",

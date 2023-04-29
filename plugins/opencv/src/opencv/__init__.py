@@ -1,21 +1,47 @@
 from __future__ import annotations
-from time import sleep
-from detect import DetectionSession, DetectPlugin
+
+import asyncio
+import concurrent.futures
 from typing import Any, List, Tuple
-import numpy as np
+import time
+
 import cv2
 import imutils
-Gst = None
-try:
-    from gi.repository import Gst
-except:
-    pass
-from scrypted_sdk.types import ObjectDetectionModel, ObjectDetectionResult, ObjectsDetected, Setting
+import numpy as np
+import scrypted_sdk
 from PIL import Image
+from scrypted_sdk.types import (ObjectDetectionGeneratorSession,ObjectDetectionSession,
+                                ObjectDetectionResult, ObjectsDetected,
+                                Setting, VideoFrame)
 
-class OpenCVDetectionSession(DetectionSession):
+from detect import DetectPlugin
+
+# vips is already multithreaded, but needs to be kicked off the python asyncio thread.
+toThreadExecutor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="image")
+
+async def to_thread(f):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(toThreadExecutor, f)
+
+async def ensureGrayData(data: bytes, size: Tuple[int, int], format: str):
+    if format == 'gray':
+        return data
+
+    def convert():
+        if format == 'rgba':
+            image = Image.frombuffer('RGBA', size, data)
+        else:
+            image = Image.frombuffer('RGB', size, data)
+
+        try:
+            return image.convert('L').tobytes()
+        finally:
+            image.close()
+    return await to_thread(convert)
+
+
+class OpenCVDetectionSession:
     def __init__(self) -> None:
-        super().__init__()
         self.cap: cv2.VideoCapture = None
         self.previous_frame: Any = None
         self.curFrame = None
@@ -24,31 +50,16 @@ class OpenCVDetectionSession(DetectionSession):
         self.thresh = None
         self.gray = None
         self.gstsample = None
+        self.lastFrame = 0
 
 
 defaultThreshold = 25
 defaultArea = 200
-defaultInterval = 250
 defaultBlur = 5
 
 class OpenCVPlugin(DetectPlugin):
     def __init__(self, nativeId: str | None = None):
         super().__init__(nativeId=nativeId)
-        self.color2Gray = None
-        self.pixelFormat = "I420"
-        self.pixelFormatChannelCount = 1
-
-        if True:
-            self.retainAspectRatio = False
-            self.color2Gray = None
-            self.pixelFormat = "I420"
-            self.pixelFormatChannelCount = 1
-        else:
-            self.retainAspectRatio = True
-            self.color2Gray = cv2.COLOR_BGRA2GRAY
-            self.pixelFormat = "BGRA"
-            self.pixelFormatChannelCount = 4
-
 
     def getClasses(self) -> list[str]:
         return ['motion']
@@ -79,77 +90,69 @@ class OpenCVPlugin(DetectPlugin):
                 'placeholder': defaultBlur,
                 'type': 'number',
             },
-            {
-                'title': "Frame Analysis Interval",
-                'description': "The number of milliseconds to wait between motion analysis.",
-                'value': defaultInterval,
-                'key': 'interval',
-                'placeholder': defaultInterval,
-                'type': 'number',
-            },
         ]
 
         return settings
-
-    def get_pixel_format(self):
-        return self.pixelFormat
+    
+    def get_input_format(self) -> str:
+        return 'gray'
 
     def parse_settings(self, settings: Any):
         area = defaultArea
         threshold = defaultThreshold
-        interval = defaultInterval
         blur = defaultBlur
+        referenceFrameFrequency = 0
         if settings:
             area = float(settings.get('area', area))
             threshold = int(settings.get('threshold', threshold))
-            interval = float(settings.get('interval', interval))
             blur = int(settings.get('blur', blur))
-        return area, threshold, interval, blur
+            referenceFrameFrequency = float(settings.get('referenceFrameFrequency', 0))
+        return area, threshold, blur, referenceFrameFrequency
 
-    def detect(self, detection_session: OpenCVDetectionSession, frame, settings: Any, src_size, convert_to_src_size) -> ObjectsDetected:
-        area, threshold, interval, blur = self.parse_settings(settings)
+    def detect(self, frame, detection_session: ObjectDetectionSession, src_size, convert_to_src_size) -> ObjectsDetected:
+        session: OpenCVDetectionSession = detection_session['settings']['session']
+        settings = detection_session and detection_session.get('settings', None)
+        area, threshold, blur, referenceFrameFrequency = self.parse_settings(settings)
 
-        # see get_detection_input_size on undocumented size requirements for GRAY8
-        if self.color2Gray != None:
-            detection_session.gray = cv2.cvtColor(
-                frame, self.color2Gray, dst=detection_session.gray)
-            gray = detection_session.gray
-        else:
-            gray = frame
-        detection_session.curFrame = cv2.GaussianBlur(
-            gray, (blur, blur), 0, dst=detection_session.curFrame)
-
-        if detection_session.previous_frame is None:
-            detection_session.previous_frame = detection_session.curFrame
-            detection_session.curFrame = None
-            return
-
-        detection_session.frameDelta = cv2.absdiff(
-            detection_session.previous_frame, detection_session.curFrame, dst=detection_session.frameDelta)
-        tmp = detection_session.curFrame
-        detection_session.curFrame = detection_session.previous_frame
-        detection_session.previous_frame = tmp
-
-        _, detection_session.thresh = cv2.threshold(
-            detection_session.frameDelta, threshold, 255, cv2.THRESH_BINARY, dst=detection_session.thresh)
-        detection_session.dilated = cv2.dilate(
-            detection_session.thresh, None, iterations=2, dst=detection_session.dilated)
-        fcontours = cv2.findContours(
-            detection_session.dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = imutils.grab_contours(fcontours)
+        gray = frame
+        session.curFrame = cv2.GaussianBlur(
+            gray, (blur, blur), 0, dst=session.curFrame)
 
         detections: List[ObjectDetectionResult] = []
         detection_result: ObjectsDetected = {}
+        now = round(time.time() * 1000)
+        detection_result['timestamp'] = now
         detection_result['detections'] = detections
         detection_result['inputDimensions'] = src_size
+
+        if session.previous_frame is None:
+            session.previous_frame = session.curFrame
+            session.curFrame = None
+            return detection_result
+
+        session.frameDelta = cv2.absdiff(
+            session.previous_frame, session.curFrame, dst=session.frameDelta)
+        if not referenceFrameFrequency or now - session.lastFrame > referenceFrameFrequency:
+            tmp = session.curFrame
+            session.curFrame = session.previous_frame
+            session.previous_frame = tmp
+
+        _, session.thresh = cv2.threshold(
+            session.frameDelta, threshold, 255, cv2.THRESH_BINARY, dst=session.thresh)
+        session.dilated = cv2.dilate(
+            session.thresh, None, iterations=2, dst=session.dilated)
+        fcontours = cv2.findContours(
+            session.dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = imutils.grab_contours(fcontours)
+
 
         for c in contours:
             x, y, w, h = cv2.boundingRect(c)
             # if w * h != contour_area:
             #     print("mismatch w/h", contour_area - w * h)
 
-            x2, y2, _ = convert_to_src_size((x + w, y + h))
-            x, y, _ = convert_to_src_size((x, y))
+            x2, y2 = convert_to_src_size((x + w, y + h))
+            x, y = convert_to_src_size((x, y))
             w = x2 - x + 1
             h = y2 - y + 1
 
@@ -163,6 +166,9 @@ class OpenCVPlugin(DetectPlugin):
                 detections.append(detection)
 
         return detection_result
+    
+    def get_input_details(self) -> Tuple[int, int, int]:
+        return (300, 300, 1)
 
     def get_detection_input_size(self, src_size):
         # The initial implementation of this plugin used BGRA
@@ -197,57 +203,59 @@ class OpenCVPlugin(DetectPlugin):
             detection_session.cap = None
         return super().end_session(detection_session)
 
-    def run_detection_image(self, detection_session: DetectionSession, image: Image.Image, settings: Any, src_size, convert_to_src_size) -> Tuple[ObjectsDetected, Any]:
-        # todo
-        raise Exception('can not run motion detection on image')
+    async def generateObjectDetections(self, videoFrames: Any, detection_session: ObjectDetectionGeneratorSession = None) -> Any:
+        if not detection_session:
+            detection_session = {}
+        if not detection_session.get('settings'):
+            detection_session['settings'] = {}
+        settings = detection_session['settings']
+        settings['session'] = OpenCVDetectionSession()
+        return super().generateObjectDetections(videoFrames, detection_session)
 
-    def run_detection_avframe(self, detection_session: DetectionSession, avframe, settings: Any, src_size, convert_to_src_size) -> Tuple[ObjectsDetected, Any]:
-        if avframe.format.name != 'yuv420p' and avframe.format.name != 'yuvj420p':
-            mat = avframe.to_ndarray(format='gray8')
+    async def run_detection_videoframe(self, videoFrame: VideoFrame, detection_session: ObjectDetectionSession) -> ObjectsDetected:
+        width = videoFrame.width
+        height = videoFrame.height
+
+        aspectRatio = width / height
+        
+        # dont bother resizing if its already fairly small
+        if width <= 640 and height < 640:
+            scale = 1
+            resize = None
         else:
-            mat = np.ndarray((avframe.height, avframe.width, self.pixelFormatChannelCount), buffer=avframe.planes[0], dtype=np.uint8)
-        detections = self.detect(
-            detection_session, mat, settings, src_size, convert_to_src_size)
-        if not detections or not len(detections['detections']):
-            self.detection_sleep(settings)
-            return None, None
-        return detections, None
+            if aspectRatio > 1:
+                scale = height / 300
+                height = 300
+                width = int(300 * aspectRatio)
+            else:
+                width = 300
+                height = int(300 / aspectRatio)
+                scale = width / 300
+            resize = {
+                'width': width,
+                'height': height,
+            }
 
-    def run_detection_gstsample(self, detection_session: OpenCVDetectionSession, gst_sample, settings: Any, src_size, convert_to_src_size) -> ObjectsDetected:
-        buf = gst_sample.get_buffer()
-        caps = gst_sample.get_caps()
-        # can't trust the width value, compute the stride
-        height = caps.get_structure(0).get_value('height')
-        width = caps.get_structure(0).get_value('width')
-        result, info = buf.map(Gst.MapFlags.READ)
-        if not result:
-            return None, None
-        try:
-            mat = np.ndarray(
-                (height,
-                 width,
-                 self.pixelFormatChannelCount),
-                buffer=info.data,
-                dtype=np.uint8)
-            detections = self.detect(
-                detection_session, mat, settings, src_size, convert_to_src_size)
-            # no point in triggering empty events.
-        finally:
-            buf.unmap(info)
+        format = videoFrame.format or 'gray'
+        buffer = await videoFrame.toBuffer({
+            'resize': resize,
+            'format': format,
+        })
 
-        if not detections or not len(detections['detections']):
-            self.detection_sleep(settings)
-            return None, None
-        return detections, None
+        if format == 'gray':
+            expectedLength = width * height
+            # check if resize could not be completed
+            if expectedLength != len(buffer):
+                image = Image.frombuffer('L', (videoFrame.width, videoFrame.height), buffer)
+                try:
+                    buffer = image.resize((width, height), Image.BILINEAR).tobytes()
+                finally:
+                    image.close()
+        else:
+            buffer = await ensureGrayData(buffer, (width, height), format)
 
-    def create_detection_session(self):
-        return OpenCVDetectionSession()
-
-    def detection_sleep(self, settings: Any):
-        area, threshold, interval, blur = self.parse_settings(settings)
-        # it is safe to block here because gstreamer creates a queue thread
-        sleep(interval / 1000)
-
-    def detection_event_notified(self, settings: Any):
-        self.detection_sleep(settings)
-        return super().detection_event_notified(settings)
+        def convert_to_src_size(point):
+            return point[0] * scale, point[1] * scale
+        mat = np.ndarray((height, width, 1), buffer=buffer, dtype=np.uint8)
+        detections = self.detect(mat, detection_session, (videoFrame.width, videoFrame.height), convert_to_src_size)
+        return detections

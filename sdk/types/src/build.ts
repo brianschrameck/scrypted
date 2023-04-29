@@ -10,8 +10,12 @@ const ScryptedInterfaceDescriptors: { [scryptedInterface: string]: ScryptedInter
 const allProperties: { [property: string]: any } = {};
 
 function toTypescriptType(type: any): string {
+    if (type.type === 'literal')
+        return `'${type.value}'`;
     if (type.type === 'array')
         return `${toTypescriptType(type.elementType)}[]`;
+    if (type.type === 'union')
+        return type.types.map((type: any) => toTypescriptType(type)).join(' | ')
     return type.name;
 }
 
@@ -75,6 +79,8 @@ discoveredTypes.add('EventDetails');
 function toPythonType(type: any): string {
     if (type.type === 'array')
         return `list[${toPythonType(type.elementType)}]`;
+    if (type.type === 'intersection')
+        return `Union[${type.types.map((et: any) => toPythonType(et)).join(', ')}]`
     if (type.type === 'tuple')
         return `tuple[${type.elements.map((et: any) => toPythonType(et)).join(', ')}]`;
     if (type.type === 'union')
@@ -192,6 +198,14 @@ for (const val of properties) {
 }
 
 python += `
+class ScryptedInterfaceMethods(Enum):
+`
+for (const val of methods) {
+    python += `    ${val} = "${val}"
+`;
+}
+
+python += `
 class DeviceState:
     def getScryptedProperty(self, property: str) -> Any:
         pass
@@ -252,9 +266,11 @@ class ${td.name}(TypedDict):
 
 const pythonTypes = `from __future__ import annotations
 from enum import Enum
-from typing_extensions import TypedDict
-from typing import Any
-from typing import Callable
+try:
+    from typing import TypedDict
+except:
+    from typing_extensions import TypedDict
+from typing import Union, Any, Callable
 
 from .other import *
 

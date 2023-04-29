@@ -21,12 +21,9 @@ def parse_label_contents(contents: str):
             ret[row_number] = content.strip()
     return ret
 
-
-MIME_TYPE = 'x-scrypted-tensorflow/x-raw-image'
-
 class TensorFlowPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Settings):
     def __init__(self, nativeId: str | None = None):
-        super().__init__(MIME_TYPE, nativeId=nativeId)
+        super().__init__(nativeId=nativeId)
 
         modelPath = os.path.join(os.environ['SCRYPTED_PLUGIN_VOLUME'], 'zip', 'unzipped', 'fs')
         self.model = tf.saved_model.load(modelPath)
@@ -47,7 +44,7 @@ class TensorFlowPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk
     def get_input_size(self) -> Tuple[float, float]:
         return (self.inputwidth, self.inputheight)
 
-    def detect_once(self, input: Image.Image, settings: Any, src_size, cvss):
+    async def detect_once(self, input: Image.Image, settings: Any, src_size, cvss):
         image_array  = tf.keras.utils.img_to_array(input)
         
         input_tensor = tf.convert_to_tensor(image_array, dtype = tf.uint8)
@@ -86,6 +83,5 @@ class TensorFlowPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk
             ))
             objs.append(obj)
 
-        allowList = settings.get('allowList', None) if settings else None
-        ret = self.create_detection_result(objs, src_size, allowList, cvss)
+        ret = self.create_detection_result(objs, src_size, cvss)
         return ret

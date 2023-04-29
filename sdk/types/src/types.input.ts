@@ -5,7 +5,7 @@ export type ScryptedNativeId = string | undefined;
 
 /**
  * All devices in Scrypted implement ScryptedDevice, which contains the id, name, and type. Add listeners to subscribe to events from that device.
- * 
+ *
  * @category Core Reference
  */
 export interface ScryptedDevice {
@@ -78,7 +78,7 @@ export interface EventDetails {
 }
 /**
  * Returned when an event listener is attached to an EventEmitter. Call removeListener to unregister from events.
- * 
+ *
  * @category Core Reference
 */
 export interface EventListenerRegister {
@@ -230,7 +230,7 @@ export interface Notifier {
 }
 /**
  * MediaObject is an intermediate object within Scrypted to represent all media objects. Plugins should use the MediaConverter to convert the Scrypted MediaObject into a desired type, whether it is a externally accessible URL, a Buffer, etc.
- * 
+ *
  * @category Media Reference
  */
 export interface MediaObject {
@@ -560,7 +560,7 @@ export interface ResponseMediaStreamOptions extends MediaStreamOptions {
 
   /**
    * Set this to true to allow for prebuffering even if the device implements the Battery interface.
-   * Handy if you have a device that can continuously prebuffer when on mains power, but you still 
+   * Handy if you have a device that can continuously prebuffer when on mains power, but you still
    * want battery status reported.
    */
   allowBatteryPrebuffer?: boolean;
@@ -736,7 +736,7 @@ export interface VideoClip {
   resources?: VideoResource;
 }
 
-export interface VideoClipOptions {
+export interface VideoClipOptions extends VideoClipThumbnailOptions {
   startTime?: number;
   endTime?: number;
   startId?: string;
@@ -744,15 +744,19 @@ export interface VideoClipOptions {
   reverseOrder?: boolean;
 }
 
+export interface VideoClipThumbnailOptions {
+  thumbnailSize?: Point;
+}
+
 export interface VideoClips {
   getVideoClips(options?: VideoClipOptions): Promise<VideoClip[]>;
   getVideoClip(videoId: string): Promise<MediaObject>;
-  getVideoClipThumbnail(thumbnailId: string): Promise<MediaObject>;
+  getVideoClipThumbnail(thumbnailId: string, options?: VideoClipThumbnailOptions): Promise<MediaObject>;
   removeVideoClips(...videoClipIds: string[]): Promise<void>;
 }
 
 /**
- * Intercom devices can playback audio. 
+ * Intercom devices can playback audio.
  */
 export interface Intercom {
   startIntercom(media: MediaObject): Promise<void>;
@@ -765,7 +769,10 @@ export enum PanTiltZoomMovement {
 }
 
 export interface PanTiltZoomCommand {
-  movement: PanTiltZoomMovement;
+  /**
+   * Specify the movement origin. If unspecified, the movement will be relative to the current position.
+   */
+  movement?: PanTiltZoomMovement;
   /**
    * Ranges between -1 and 1.
    */
@@ -871,7 +878,7 @@ export interface EntrySensor {
 }
 /**
  * DeviceManager is the interface used by DeviceProvider to report new devices, device states, and device events to Scrypted.
- * 
+ *
  * @category Device Provider Reference
  */
 export interface DeviceManager {
@@ -949,7 +956,7 @@ export interface DeviceManager {
 }
 /**
  * DeviceProvider acts as a controller/hub and exposes multiple devices to Scrypted Device Manager.
- * 
+ *
  * @category Device Provider Reference
  */
 export interface DeviceProvider {
@@ -967,7 +974,7 @@ export interface DeviceProvider {
 }
 /**
  * DeviceManifest is passed to DeviceManager.onDevicesChanged to sync a full list of devices from the controller/hub (Hue, SmartThings, etc)
- * 
+ *
  * @category Device Provider Reference
  */
 export interface DeviceManifest {
@@ -982,7 +989,7 @@ export interface DeviceCreatorSettings {
 }
 /**
  * A DeviceProvider that allows the user to create a device.
- * 
+ *
  * @category Device Provider Reference
  */
 export interface DeviceCreator {
@@ -1010,7 +1017,7 @@ export interface AdoptDevice {
 }
 /**
  * A DeviceProvider that has a device discovery mechanism.
- * 
+ *
  * @category Device Provider Reference
  */
 export interface DeviceDiscovery {
@@ -1032,9 +1039,21 @@ export interface DeviceDiscovery {
 export interface Battery {
   batteryLevel?: number;
 }
+export enum ChargeState {
+  Trickle = 'trickle',
+  Charging = 'charging',
+  NotCharging = 'not-charging',
+}
+/**
+ * Charger reports whether or not a device is being charged from an external power source.
+ * Usually used for battery powered devices.
+ */
+export interface Charger {
+  chargeState?: ChargeState;
+}
 /**
  * Refresh indicates that this device has properties that are not automatically updated, and must be periodically refreshed via polling. Device implementations should never implement their own underlying polling algorithm, and instead implement Refresh to allow Scrypted to manage polling intelligently.
- * 
+ *
  * @category Device Provider Reference
  */
 export interface Refresh {
@@ -1240,23 +1259,17 @@ export interface ObjectDetectionResult extends BoundingBoxResult {
   name?: string;
   score: number;
   resources?: VideoResource;
+  /**
+   * Movement history will track the first/last time this object was moving.
+   */
+  movement?: ObjectDetectionHistory & { moving?: boolean; };
 }
 export interface ObjectsDetected {
-  /**
-   * Object detection session state. Will be true if processing video, until
-   * the video ends or is timed out.
-   */
-  running?: boolean;
   detections?: ObjectDetectionResult[];
   /**
    * The id for the detection session.
    */
   detectionId?: string;
-  /**
-   * The id for this specific event/frame within a detection video session.
-   * Will be undefined for single image detections.
-   */
-  eventId?: any;
   inputDimensions?: [number, number],
   timestamp: number;
   resources?: VideoResource;
@@ -1287,17 +1300,19 @@ export interface ObjectDetector {
   getObjectTypes(): Promise<ObjectDetectionTypes>;
 }
 export interface ObjectDetectionGeneratorSession {
+  zones?: ObjectDetectionZone[];
   settings?: { [key: string]: any };
+  sourceId?: string;
 }
 export interface ObjectDetectionSession extends ObjectDetectionGeneratorSession {
-  detectionId?: string;
-  duration?: number;
 }
 export interface ObjectDetectionModel extends ObjectDetectionTypes {
   name: string;
   inputSize?: number[];
+  inputFormat?: 'gray' | 'rgb' | 'rgba';
   settings: Setting[];
   triggerClasses?: string[];
+  prebuffer?: number;
 }
 export interface ObjectDetectionCallbacks {
   onDetection(detection: ObjectsDetected, redetect?: (boundingBox: [number, number, number, number]) => Promise<ObjectDetectionResult[]>, mediaObject?: MediaObject): Promise<boolean>;
@@ -1305,18 +1320,25 @@ export interface ObjectDetectionCallbacks {
 }
 export interface ObjectDetectionGeneratorResult {
   __json_copy_serialize_children: true,
-  videoFrame: VideoFrame;
+  videoFrame: VideoFrame & MediaObject;
   detected: ObjectsDetected;
+}
+export interface ObjectDetectionZone {
+  exclusion?: boolean;
+  type?: 'Intersect' | 'Contain';
+  classes?: string[];
+  path?: ClipPath;
 }
 /**
  * ObjectDetection can run classifications or analysis on arbitrary media sources.
  * E.g. TensorFlow, OpenCV, or a Coral TPU.
  */
 export interface ObjectDetection {
-  generateObjectDetections(videoFrames: AsyncGenerator<VideoFrame>, session: ObjectDetectionGeneratorSession): Promise<AsyncGenerator<ObjectDetectionGeneratorResult>>;
-  detectObjects(mediaObject: MediaObject, session?: ObjectDetectionSession, callbacks?: ObjectDetectionCallbacks): Promise<ObjectsDetected>;
+  generateObjectDetections(videoFrames: AsyncGenerator<VideoFrame & MediaObject, void>, session: ObjectDetectionGeneratorSession): Promise<AsyncGenerator<ObjectDetectionGeneratorResult, void>>;
+  detectObjects(mediaObject: MediaObject, session?: ObjectDetectionSession): Promise<ObjectsDetected>;
   getDetectionModel(settings?: { [key: string]: any }): Promise<ObjectDetectionModel>;
 }
+export type ImageFormat = 'gray' | 'rgba' | 'rgb' | 'jpg';
 export interface ImageOptions {
   crop?: {
     left: number;
@@ -1328,18 +1350,28 @@ export interface ImageOptions {
     width?: number,
     height?: number,
   };
-  format?: 'rgba' | 'rgb' | 'jpg';
+  format?: ImageFormat;
 }
 export interface Image {
   width: number;
   height: number;
+  /**
+   * The in raw memory format of this image.
+   * Operations of this image may only safely request
+   * this format, or a compressed format such as jpg.
+   */
+  format?: ImageFormat;
   toBuffer(options?: ImageOptions): Promise<Buffer>;
   toImage(options?: ImageOptions): Promise<Image & MediaObject>;
 }
 export interface VideoFrame extends Image {
   timestamp: number;
+  queued: number;
+  flush(count?: number): Promise<void>;
 }
 export interface VideoFrameGeneratorOptions extends ImageOptions {
+  queue?: number;
+  fps?: number;
 }
 export interface VideoFrameGenerator {
   generateVideoFrames(mediaObject: MediaObject, options?: VideoFrameGeneratorOptions, filter?: (videoFrame: VideoFrame & MediaObject) => Promise<boolean>): Promise<AsyncGenerator<VideoFrame & MediaObject>>;
@@ -1525,7 +1557,7 @@ export interface DeviceInformation {
 }
 /**
  * Device objects are created by DeviceProviders when new devices are discover and synced to Scrypted via the DeviceManager.
- * 
+ *
  * @category Device Provider Reference
  */
 export interface Device {
@@ -1551,7 +1583,7 @@ export interface EndpointAccessControlAllowOrigin {
 
 /**
  * EndpointManager provides publicly accessible URLs that can be used to contact your Scrypted Plugin.
- * 
+ *
  * @category Webhook and Push Reference
  */
 export interface EndpointManager {
@@ -1644,7 +1676,7 @@ export interface EndpointManager {
 }
 /**
  * SystemManager is used by scripts to query device state and access devices.
- * 
+ *
  * @category Core Reference
  */
 export interface SystemManager {
@@ -1662,6 +1694,16 @@ export interface SystemManager {
    * Find a Scrypted device by id.
    */
   getDeviceById<T>(id: string): ScryptedDevice & T;
+
+  /**
+   * Find a Scrypted device by pluginId and optionally the nativeId.
+   */
+  getDeviceById(pluginId: string, nativeId?: ScryptedNativeId): ScryptedDevice;
+
+  /**
+   * Find a Scrypted device by pluginId and optionally the nativeId.
+   */
+  getDeviceById<T>(pluginId: string, nativeId?: ScryptedNativeId): ScryptedDevice & T;
 
   /**
    * Find a Scrypted device by name.
@@ -1702,7 +1744,7 @@ export interface SystemManager {
 }
 /**
  * MixinProviders can add and intercept interfaces to other devices to add or augment their behavior.
- * 
+ *
  * @category Mixin Reference
  */
 export interface MixinProvider {
@@ -1723,7 +1765,7 @@ export interface MixinProvider {
 }
 /**
  * The HttpRequestHandler allows handling of web requests under the endpoint path: /endpoint/npm-package-name/*.
- * 
+ *
  * @category Webhook and Push Reference
  */
 export interface HttpRequestHandler {
@@ -1748,7 +1790,7 @@ export interface HttpRequest {
 }
 /**
  * Response object provided by the HttpRequestHandler.
- * 
+ *
  * @category Webhook and Push Reference
  */
 export interface HttpResponse {
@@ -1779,7 +1821,7 @@ export interface EngineIOHandler {
 }
 /**
  * @category Webhook and Push Reference
- * 
+ *
  */
 export interface PushHandler {
   /**
@@ -1805,6 +1847,8 @@ export enum MediaPlayerState {
   Buffering = "Buffering",
 }
 export type SettingValue = undefined | null | string | number | boolean | string[] | number[];
+export type Point = [number, number];
+export type ClipPath = Point[];
 export interface Setting {
   key?: string;
   title?: string;
@@ -1812,7 +1856,7 @@ export interface Setting {
   subgroup?: string;
   description?: string;
   placeholder?: string;
-  type?: 'string' | 'password' | 'number' | 'boolean' | 'device' | 'integer' | 'button' | 'clippath' | 'interface' | 'qrcode' | 'textarea';
+  type?: 'string' | 'password' | 'number' | 'boolean' | 'device' | 'integer' | 'button' | 'clippath' | 'interface' | 'qrcode' | 'textarea' | 'date' | 'time' | 'datetime';
   /**
    * The range of allowed numbers, if any, when the type is 'number'.
    */
@@ -1873,6 +1917,7 @@ export enum ScryptedInterface {
   DeviceDiscovery = "DeviceDiscovery",
   DeviceCreator = "DeviceCreator",
   Battery = "Battery",
+  Charger = "Charger",
   Refresh = "Refresh",
   MediaPlayer = "MediaPlayer",
   Online = "Online",
@@ -1923,7 +1968,7 @@ export type RTCSignalingSendIceCandidate = (candidate: RTCIceCandidateInit) => P
 
 /**
  * Implemented by WebRTC cameras to negotiate a peer connection session with Scrypted.
- * 
+ *
  * @category WebRTC Reference
  */
 export interface RTCSignalingSession {
@@ -1942,7 +1987,15 @@ export interface RTCSignalingOptions {
    */
   offer?: RTCSessionDescriptionInit;
   requiresOffer?: boolean;
+  requiresAnswer?: boolean;
+  /**
+   * Disables trickle ICE. All candidates must be sent in the initial offer/answer sdp.
+   */
   disableTrickle?: boolean;
+  /**
+   * Disables usage of TURN servers, if this client exposes public addresses or provides its own.
+   */
+  disableTurn?: boolean;
   /**
    * Hint to proxy the feed, as the target client may be inflexible.
    */
@@ -1960,7 +2013,7 @@ export interface RTCSignalingOptions {
 }
 
 /**
- * A flexible RTC signaling endpoint, typically a browser, that can handle offer and answer. 
+ * A flexible RTC signaling endpoint, typically a browser, that can handle offer and answer.
  * Like Chromecast, etc, which has a Chromecast AppId that can connect to Scrypted.
  */
 export interface RTCSignalingClient {
@@ -2010,7 +2063,7 @@ export interface RTCConnectionManagement {
  * An inflexible RTC Signaling channel, typically a vendor, like Nest or Ring.
  * They generally can only handle either offer or answer, but not both. Usually has
  * strict requirements and expectations on client setup.
- * 
+ *
  * @category WebRTC Reference
  */
 export interface RTCSignalingChannel {

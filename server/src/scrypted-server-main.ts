@@ -7,7 +7,6 @@ import fs from 'fs';
 import http from 'http';
 import httpAuth from 'http-auth';
 import https from 'https';
-import ip from 'ip';
 import mkdirp from 'mkdirp';
 import net from 'net';
 import os from 'os';
@@ -27,6 +26,8 @@ import { Info } from './services/info';
 import { setScryptedUserPassword } from './services/users';
 import { sleep } from './sleep';
 import { ONE_DAY_MILLISECONDS, UserToken } from './usertoken';
+
+export type Runtime = ScryptedRuntime;
 
 if (!semver.gte(process.version, '16.0.0')) {
     throw new Error('"node" version out of date. Please update node to v16 or higher.')
@@ -105,7 +106,9 @@ app.use(bodyParser.json())
 // parse some custom thing into a Buffer
 app.use(bodyParser.raw({ type: 'application/zip', limit: 100000000 }) as any)
 
-async function start() {
+async function start(mainFilename: string, options?: {
+    onRuntimeCreated?: (runtime: ScryptedRuntime) => Promise<void>,
+}) {
     const volumeDir = getScryptedVolume();
     mkdirp.sync(volumeDir);
     const dbPath = path.join(volumeDir, 'scrypted.db');
@@ -209,7 +212,7 @@ async function start() {
                 const sha = hash.digest().toString('hex');
 
                 if (checkHash === sha) {
-                    const userToken = validateToken(tokenPart);
+                    const userToken = checkValidUserToken(tokenPart);
                     if (userToken) {
                         res.locals.username = userToken.username;
                         res.locals.aclId = userToken.aclId;
@@ -271,7 +274,8 @@ async function start() {
         next();
     });
 
-    const scrypted = new ScryptedRuntime(db, insecure, secure, app);
+    const scrypted = new ScryptedRuntime(mainFilename, db, insecure, secure, app);
+    await options?.onRuntimeCreated?.(scrypted);
     await scrypted.start();
 
     listenServerPort('SCRYPTED_SECURE_PORT', SCRYPTED_SECURE_PORT, secure);
@@ -416,19 +420,23 @@ async function start() {
         return req.secure ? 'login_user_token' : 'login_user_token_insecure';
     };
 
-    const validateToken = (token: string) => {
+    const checkValidUserToken = (token: string) => {
         if (!token)
             return;
         try {
-            return UserToken.validateToken(token);
+            const userToken = UserToken.validateToken(token);
+            if (scrypted.usersService.users.has(userToken.username))
+                return userToken;
         }
         catch (e) {
-            console.warn('invalid token', e.message);
+            // console.warn('invalid token', e.message);
         }
     }
 
-    const getSignedLoginUserTokenRawValue = (req: Request<any>) => req.signedCookies[getLoginUserToken(req)] as string;
-    const getSignedLoginUserToken = (req: Request<any>) => validateToken(getSignedLoginUserTokenRawValue(req));
+    const getSignedLoginUserToken = (req: Request<any>) => {
+        const token = req.signedCookies[getLoginUserToken(req)] as string;
+        return checkValidUserToken(token)
+    };
 
     app.get('/logout', (req, res) => {
         res.clearCookie(getLoginUserToken(req));
@@ -442,24 +450,19 @@ async function start() {
 
     let hasLogin = await db.getCount(ScryptedUser) > 0;
 
+    if (process.env.SCRYPTED_ADMIN_USERNAME && process.env.SCRYPTED_ADMIN_TOKEN) {
+        let user = await db.tryGet(ScryptedUser, process.env.SCRYPTED_ADMIN_USERNAME);
+        if (!user) {
+            user = await scrypted.usersService.addUserInternal(process.env.SCRYPTED_ADMIN_USERNAME, crypto.randomBytes(8).toString('hex'), undefined);
+            hasLogin = true;
+        }
+    }
+
     app.options('/login', (req, res) => {
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Content-Length, X-Requested-With');
         res.send(200);
     });
-
-    const resetLogin = path.join(getScryptedVolume(), 'reset-login');
-    async function checkResetLogin() {
-        try {
-            if (fs.existsSync(resetLogin)) {
-                fs.rmSync(resetLogin);
-                await db.removeAll(ScryptedUser);
-                hasLogin = false;
-            }
-        }
-        catch (e) {
-        }
-    }
 
     app.post('/login', async (req, res) => {
         const { username, password, change_password, maxAge: maxAgeRequested } = req.body;
@@ -521,11 +524,7 @@ async function start() {
             return;
         }
 
-        const user = new ScryptedUser();
-        user._id = username;
-        setScryptedUserPassword(user, password, timestamp);
-        user.token = crypto.randomBytes(16).toString('hex');
-        await db.upsert(user);
+        const user = await scrypted.usersService.addUserInternal(username, password, undefined);
         hasLogin = true;
 
         const userToken = new UserToken(username, user.aclId, timestamp);
@@ -546,6 +545,19 @@ async function start() {
         });
     });
 
+    const resetLogin = path.join(getScryptedVolume(), 'reset-login');
+    async function checkResetLogin() {
+        try {
+            if (fs.existsSync(resetLogin)) {
+                fs.rmSync(resetLogin);
+                await db.removeAll(ScryptedUser);
+                hasLogin = false;
+            }
+        }
+        catch (e) {
+        }
+    }
+
     app.get('/login', async (req, res) => {
         await checkResetLogin();
 
@@ -554,7 +566,11 @@ async function start() {
 
         // env/header based admin login
         if (res.locals.username && res.locals.username === process.env.SCRYPTED_ADMIN_USERNAME) {
+            const userToken = new UserToken(res.locals.username, undefined, Date.now());
+
             res.send({
+                ...createTokens(userToken),
+                expiration: ONE_DAY_MILLISECONDS,
                 username: res.locals.username,
                 token: process.env.SCRYPTED_ADMIN_TOKEN,
                 addresses,
@@ -601,10 +617,9 @@ async function start() {
 
         // cookie auth
         try {
-            const login_user_token = getSignedLoginUserTokenRawValue(req);
-            if (!login_user_token)
+            const userToken = getSignedLoginUserToken(req);
+            if (!userToken)
                 throw new Error('Not logged in.');
-            const userToken = UserToken.validateToken(login_user_token);
 
             res.send({
                 ...createTokens(userToken),
@@ -625,6 +640,8 @@ async function start() {
     });
 
     app.get('/', (_req, res) => res.redirect('/endpoint/@scrypted/core/public/'));
+
+    return scrypted;
 }
 
-start();
+export default start;

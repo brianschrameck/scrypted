@@ -15,9 +15,9 @@ import os from 'os';
 import { getAddressOverride } from '../../address-override';
 import { AudioStreamingCodecType, CameraController, CameraStreamingDelegate, PrepareStreamCallback, PrepareStreamRequest, PrepareStreamResponse, StartStreamRequest, StreamingRequest, StreamRequestCallback, StreamRequestTypes } from '../../hap';
 import type { HomeKitPlugin } from "../../main";
-import { createReturnAudioSdp } from './camera-return-audio';
 import { createSnapshotHandler } from '../camera/camera-snapshot';
 import { getDebugMode } from './camera-debug-mode-storage';
+import { createReturnAudioSdp } from './camera-return-audio';
 import { startCameraStreamFfmpeg } from './camera-streaming-ffmpeg';
 import { CameraStreamingSession } from './camera-streaming-session';
 import { getStreamingConfiguration } from './camera-utils';
@@ -158,33 +158,33 @@ export function createCameraStreamingDelegate(device: ScryptedDevice & VideoCame
                 // may not be reachable.
                 // Return the incoming address, assuming the sanity checks pass. Otherwise, fall through
                 // to the HAP-NodeJS implementation.
-                let check: string;
-                if (request.addressVersion === 'ipv4') {
-                    const localAddress = request.connection.localAddress;
-                    if (v4Regex.exec(localAddress)) {
-                        check = localAddress;
-                    }
-                    else if (v4v6Regex.exec(localAddress)) {
-                        // if this is a v4 over v6 address, parse it out.
-                        check = localAddress.substring('::ffff:'.length);
-                    }
-                }
-                else if (request.addressVersion === 'ipv6' && !v4Regex.exec(request.connection.localAddress)) {
-                    check = request.connection.localAddress;
-                }
+                // let check: string;
+                // if (request.addressVersion === 'ipv4') {
+                //     const localAddress = request.connection.localAddress;
+                //     if (v4Regex.exec(localAddress)) {
+                //         check = localAddress;
+                //     }
+                //     else if (v4v6Regex.exec(localAddress)) {
+                //         // if this is a v4 over v6 address, parse it out.
+                //         check = localAddress.substring('::ffff:'.length);
+                //     }
+                // }
+                // else if (request.addressVersion === 'ipv6' && !v4Regex.exec(request.connection.localAddress)) {
+                //     check = request.connection.localAddress;
+                // }
 
-                // ignore the IP if it is APIPA (Automatic Private IP Addressing)
-                if (check?.startsWith('169.')) {
-                    check = undefined;
-                }
+                // // ignore the IP if it is APIPA (Automatic Private IP Addressing)
+                // if (check?.startsWith('169.')) {
+                //     check = undefined;
+                // }
 
-                // sanity check this address.
-                if (check) {
-                    const infos = os.networkInterfaces()[request.connection.networkInterface];
-                    if (infos && infos.find(info => info.address === check)) {
-                        response.addressOverride = check;
-                    }
-                }
+                // // sanity check this address.
+                // if (check) {
+                //     const infos = os.networkInterfaces()[request.connection.networkInterface];
+                //     if (infos && infos.find(info => info.address === check)) {
+                //         response.addressOverride = check;
+                //     }
+                // }
             }
 
             console.log('source address', response.addressOverride, videoPort, audioPort);
@@ -375,6 +375,12 @@ export function createCameraStreamingDelegate(device: ScryptedDevice & VideoCame
                 let playing = false;
                 session.audioReturn.once('message', async buffer => {
                     try {
+                        const decrypted = srtpSession.decrypt(buffer);
+                        const rtp = RtpPacket.deSerialize(decrypted);
+
+                        if (rtp.header.payloadType !== session.startRequest.audio.pt)
+                            return;
+
                         const { clientPromise, url } = await listenZeroSingleClient();
                         const rtspUrl = url.replace('tcp', 'rtsp');
                         let sdp = createReturnAudioSdp(session.startRequest.audio);

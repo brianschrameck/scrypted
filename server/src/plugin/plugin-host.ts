@@ -1,3 +1,4 @@
+import os from 'os';
 import { Device, EngineIOHandler } from '@scrypted/types';
 import AdmZip from 'adm-zip';
 import crypto from 'crypto';
@@ -26,9 +27,6 @@ import { LazyRemote } from './plugin-lazy-remote';
 import { setupPluginRemote } from './plugin-remote';
 import { WebSocketConnection } from './plugin-remote-websocket';
 import { ensurePluginVolume, getScryptedVolume } from './plugin-volume';
-import { NodeForkWorker } from './runtime/node-fork-worker';
-import { NodeThreadWorker } from './runtime/node-thread-worker';
-import { PythonRuntimeWorker } from './runtime/python-worker';
 import { RuntimeWorker } from './runtime/runtime-worker';
 
 const serverVersion = require('../../package.json').version;
@@ -288,26 +286,17 @@ export class PluginHost {
     startPluginHost(logger: Logger, env: any, pluginDebug: PluginDebug) {
         let connected = true;
 
-        if (this.packageJson.scrypted.runtime === 'python') {
-            this.worker = new PythonRuntimeWorker(this.pluginId, {
-                env,
-                pluginDebug,
-            });
-        }
-        else {
-            if (!process.env.SCRYPTED_SHARED_WORKER || (this.packageJson.optionalDependencies && Object.keys(this.packageJson.optionalDependencies).length)) {
-                this.worker = new NodeForkWorker(this.pluginId, {
-                    env,
-                    pluginDebug,
-                });
-            }
-            else {
-                this.worker = new NodeThreadWorker(this.pluginId, {
-                    env,
-                    pluginDebug,
-                });
-            }
-        }
+        let { runtime } = this.packageJson.scrypted;
+        runtime ||= 'node';
+
+        const workerHost = this.scrypted.pluginHosts.get(runtime);
+        if (!workerHost)
+            throw new Error(`Unsupported Scrypted runtime: ${this.packageJson.scrypted.runtime}`);
+
+        this.worker = workerHost(this.scrypted.mainFilename, this.pluginId, {
+            env,
+            pluginDebug,
+        });
 
         this.peer = new RpcPeer('host', this.pluginId, (message, reject, serializationContext) => {
             if (connected) {
@@ -322,7 +311,9 @@ export class PluginHost {
 
         this.worker.stdout.on('data', data => console.log(data.toString()));
         this.worker.stderr.on('data', data => console.error(data.toString()));
-        const consoleHeader = `server version: ${serverVersion}\nplugin version: ${this.pluginId} ${this.packageJson.version}\n`;
+        let consoleHeader = `${os.platform()} ${os.arch()} ${os.version()}\nserver version: ${serverVersion}\nplugin version: ${this.pluginId} ${this.packageJson.version}\n`;
+        if (process.env.SCRYPTED_DOCKER_FLAVOR)
+            consoleHeader += `${process.env.SCRYPTED_DOCKER_FLAVOR}\n`;
         this.consoleServer = createConsoleServer(this.worker.stdout, this.worker.stderr, consoleHeader);
 
         const disconnect = () => {

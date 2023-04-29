@@ -30,15 +30,17 @@ export function startPeriodicGarbageCollection() {
 }
 
 export interface RpcMessage {
-    type: string;
+    type: 'apply' | 'result' | 'finalize' | 'param';
 }
 
-interface RpcParam extends RpcMessage {
+export interface RpcParam extends RpcMessage {
+    type: 'param';
     id: string;
     param: string;
 }
 
-interface RpcApply extends RpcMessage {
+export interface RpcApply extends RpcMessage {
+    type: 'apply';
     id: string | undefined;
     proxyId: string;
     args: any[];
@@ -46,7 +48,8 @@ interface RpcApply extends RpcMessage {
     oneway?: boolean;
 }
 
-interface RpcResult extends RpcMessage {
+export interface RpcResult extends RpcMessage {
+    type: 'result';
     id: string;
     // TODO 3/2/2023
     // deprecate these properties from rpc protocol. treat error results like any other result
@@ -63,6 +66,12 @@ interface RpcResult extends RpcMessage {
     result?: any;
 }
 
+interface RpcFinalize extends RpcMessage {
+    type: 'finalize';
+    __local_proxy_id: string;
+    __local_proxy_finalizer_id: string | undefined;
+}
+
 interface RpcRemoteProxyValue {
     __remote_proxy_id: string | undefined;
     __remote_proxy_finalizer_id: string | undefined;
@@ -74,11 +83,6 @@ interface RpcRemoteProxyValue {
 
 interface RpcLocalProxyValue {
     __local_proxy_id: string;
-}
-
-interface RpcFinalize extends RpcMessage {
-    __local_proxy_id: string;
-    __local_proxy_finalizer_id: string | undefined;
 }
 
 interface Deferred {
@@ -316,6 +320,7 @@ export class RpcPeer {
     killed: Promise<string>;
     killedDeferred: Deferred;
     tags: any = {};
+    yieldedAsyncIterators = new Set<AsyncGenerator>();
 
     static readonly finalizerIdSymbol = Symbol('rpcFinalizerId');
     static remotesCollected = 0;
@@ -441,6 +446,10 @@ export class RpcPeer {
         for (const result of Object.values(this.pendingResults)) {
             result.reject(error);
         }
+        for (const y of this.yieldedAsyncIterators) {
+            y.throw(error);
+        }
+        this.yieldedAsyncIterators.clear();
         this.pendingResults = Object.freeze({});
         this.params = Object.freeze({});
         this.remoteWeakProxies = Object.freeze({});
@@ -731,9 +740,13 @@ export class RpcPeer {
                             const method = target[rpcApply.method];
                             if (!method)
                                 throw new Error(`target ${target?.constructor?.name} does not have method ${rpcApply.method}`);
+
+                            const isIteratorNext = RpcPeer.getIteratorNext(target) === rpcApply.method;
+                            if (isIteratorNext)
+                                this.yieldedAsyncIterators.delete(target);
                             value = await target[rpcApply.method](...args);
 
-                            if (RpcPeer.getIteratorNext(target) === rpcApply.method) {
+                            if (isIteratorNext) {
                                 if (value.done) {
                                     const errorType: ErrorType = {
                                         name: 'StopAsyncIteration',
@@ -742,6 +755,12 @@ export class RpcPeer {
                                     throw errorType;
                                 }
                                 else {
+                                    if (Object.isFrozen(this.pendingResults)) {
+                                        (target as AsyncGenerator).throw(new RPCResultError(this, 'RpcPeer has been killed (yield)'));
+                                    }
+                                    else {
+                                        this.yieldedAsyncIterators.add(target);
+                                    }
                                     value = value.value;
                                 }
                             }
