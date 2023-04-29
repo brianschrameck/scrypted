@@ -1,11 +1,10 @@
 from __future__ import annotations
 from enum import Enum
 try:
-    from typing import TypedDict, Union
+    from typing import TypedDict
 except:
-    from typing_extensions import TypedDict, Union
-from typing import Any
-from typing import Callable
+    from typing_extensions import TypedDict
+from typing import Union, Any, Callable
 
 from .other import *
 
@@ -234,6 +233,9 @@ class Resource(TypedDict):
     href: str
     pass
 
+class ClipPath(TypedDict):
+    pass
+
 class AudioStreamOptions(TypedDict):
     bitrate: float
     codec: str
@@ -257,6 +259,13 @@ class ObjectDetectionResult(TypedDict):
     score: float
     zoneHistory: Any
     zones: list[str]
+    pass
+
+class ObjectDetectionZone(TypedDict):
+    classes: list[str]
+    exclusion: bool
+    path: ClipPath
+    type: Any | Any
     pass
 
 class PictureDimensions(TypedDict):
@@ -301,6 +310,9 @@ class MediaStreamSource(TypedDict):
     pass
 
 class MediaStreamTool(TypedDict):
+    pass
+
+class Point(TypedDict):
     pass
 
 class AdoptDevice(TypedDict):
@@ -496,6 +508,7 @@ class ObjectDetectionGeneratorResult(TypedDict):
 class ObjectDetectionGeneratorSession(TypedDict):
     settings: Any
     sourceId: str
+    zones: list[ObjectDetectionZone]
     pass
 
 class ObjectDetectionModel(TypedDict):
@@ -511,6 +524,7 @@ class ObjectDetectionModel(TypedDict):
 class ObjectDetectionSession(TypedDict):
     settings: Any
     sourceId: str
+    zones: list[ObjectDetectionZone]
     pass
 
 class ObjectDetectionTypes(TypedDict):
@@ -702,6 +716,11 @@ class VideoClipOptions(TypedDict):
     reverseOrder: bool
     startId: str
     startTime: float
+    thumbnailSize: Point
+    pass
+
+class VideoClipThumbnailOptions(TypedDict):
+    thumbnailSize: Point
     pass
 
 class VideoFrameGeneratorOptions(TypedDict):
@@ -1167,7 +1186,7 @@ class VideoCameraConfiguration:
 class VideoClips:
     async def getVideoClip(self, videoId: str) -> MediaObject:
         pass
-    async def getVideoClipThumbnail(self, thumbnailId: str) -> MediaObject:
+    async def getVideoClipThumbnail(self, thumbnailId: str, options: VideoClipThumbnailOptions = None) -> MediaObject:
         pass
     async def getVideoClips(self, options: VideoClipOptions = None) -> list[VideoClip]:
         pass
