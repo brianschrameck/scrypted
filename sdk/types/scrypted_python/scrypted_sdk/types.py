@@ -139,6 +139,7 @@ class ScryptedInterface(Enum):
     RTCSignalingChannel = "RTCSignalingChannel"
     RTCSignalingClient = "RTCSignalingClient"
     Readme = "Readme"
+    Reboot = "Reboot"
     Refresh = "Refresh"
     Scene = "Scene"
     Scriptable = "Scriptable"
@@ -310,9 +311,6 @@ class MediaStreamSource(TypedDict):
     pass
 
 class MediaStreamTool(TypedDict):
-    pass
-
-class Point(TypedDict):
     pass
 
 class AdoptDevice(TypedDict):
@@ -502,7 +500,7 @@ class NotifierOptions(TypedDict):
 class ObjectDetectionGeneratorResult(TypedDict):
     __json_copy_serialize_children: Any
     detected: ObjectsDetected
-    videoFrame: Union[VideoFrame, MediaObject]
+    videoFrame: VideoFrame
     pass
 
 class ObjectDetectionGeneratorSession(TypedDict):
@@ -711,16 +709,16 @@ class VideoClip(TypedDict):
     pass
 
 class VideoClipOptions(TypedDict):
+    aspectRatio: float
     count: float
     endTime: float
     reverseOrder: bool
     startId: str
     startTime: float
-    thumbnailSize: Point
     pass
 
 class VideoClipThumbnailOptions(TypedDict):
-    thumbnailSize: Point
+    aspectRatio: float
     pass
 
 class VideoFrameGeneratorOptions(TypedDict):
@@ -957,7 +955,7 @@ class OauthClient:
 class ObjectDetection:
     async def detectObjects(self, mediaObject: MediaObject, session: ObjectDetectionSession = None) -> ObjectsDetected:
         pass
-    async def generateObjectDetections(self, videoFrames: AsyncGenerator, session: ObjectDetectionGeneratorSession) -> ObjectDetectionGeneratorResult:
+    async def generateObjectDetections(self, videoFrames: VideoFrame, session: ObjectDetectionGeneratorSession) -> ObjectDetectionGeneratorResult:
         pass
     async def getDetectionModel(self, settings: Any = None) -> ObjectDetectionModel:
         pass
@@ -1042,6 +1040,11 @@ class PushHandler:
 
 class Readme:
     async def getReadmeMarkdown(self) -> str:
+        pass
+    pass
+
+class Reboot:
+    async def reboot(self) -> None:
         pass
     pass
 
@@ -1195,7 +1198,7 @@ class VideoClips:
     pass
 
 class VideoFrameGenerator:
-    async def generateVideoFrames(self, mediaObject: MediaObject, options: VideoFrameGeneratorOptions = None, filter: Any = None) -> AsyncGenerator:
+    async def generateVideoFrames(self, mediaObject: MediaObject, options: VideoFrameGeneratorOptions = None, filter: Any = None) -> VideoFrame:
         pass
     pass
 
@@ -1464,6 +1467,7 @@ class ScryptedInterfaceMethods(Enum):
     discoverDevices = "discoverDevices"
     createDevice = "createDevice"
     getCreateDeviceSettings = "getCreateDeviceSettings"
+    reboot = "reboot"
     getRefreshFrequency = "getRefreshFrequency"
     refresh = "refresh"
     getMediaStatus = "getMediaStatus"
@@ -2246,6 +2250,13 @@ ScryptedInterfaceDescriptors = {
       "chargeState"
     ]
   },
+  "Reboot": {
+    "name": "Reboot",
+    "methods": [
+      "reboot"
+    ],
+    "properties": []
+  },
   "Refresh": {
     "name": "Refresh",
     "methods": [
@@ -2574,16 +2585,11 @@ class HttpResponse:
     pass
 
 class VideoFrame:
-    format: ImageFormat
-    height: float
+    __json_copy_serialize_children: Any
+    image: Union[Image, MediaObject]
     queued: float
     timestamp: float
-    width: float
     async def flush(self, count: float = None) -> None:
-        pass
-    async def toBuffer(self, options: ImageOptions = None) -> bytearray:
-        pass
-    async def toImage(self, options: ImageOptions = None) -> Union[Image, MediaObject]:
         pass
     pass
 
