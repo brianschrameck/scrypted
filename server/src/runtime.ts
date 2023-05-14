@@ -827,18 +827,22 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
         return ret;
     }
 
-    killall() {
+    kill() {
         for (const host of Object.values(this.plugins)) {
             host?.kill();
         }
+    }
+
+    exit() {
+        this.kill();
         process.exit();
     }
 
     async start() {
         // catch ctrl-c
-        process.on('SIGINT', () => this.killall());
+        process.on('SIGINT', () => this.exit());
         // catch kill
-        process.on('SIGTERM', () => this.killall());
+        process.on('SIGTERM', () => this.exit());
 
         for await (const pluginDevice of this.datastore.getAll(PluginDevice)) {
             // this may happen due to race condition around deletion/update. investigate.
@@ -916,6 +920,15 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
             }
             catch (e) {
                 console.error('error probing plugin devices', plugin._id, e);
+            }
+        }
+
+        if (process.env.SCRYPTED_INSTALL_PLUGIN && !plugins.find(plugin => plugin._id === process.env.SCRYPTED_INSTALL_PLUGIN)) {
+            try {
+                await this.installNpm(process.env.SCRYPTED_INSTALL_PLUGIN);
+            }
+            catch (e) {
+                console.error('failed to auto install plugin', process.env.SCRYPTED_INSTALL_PLUGIN);
             }
         }
     }

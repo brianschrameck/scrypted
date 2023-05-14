@@ -1,6 +1,6 @@
 import { Deferred } from '@scrypted/common/src/deferred';
 import { sleep } from '@scrypted/common/src/sleep';
-import sdk, { Camera, DeviceProvider, DeviceState, EventListenerRegister, MediaObject, MediaStreamDestination, MixinDeviceBase, MixinProvider, MotionSensor, ObjectDetection, ObjectDetectionGeneratorResult, ObjectDetectionModel, ObjectDetectionTypes, ObjectDetectionZone, ObjectDetector, ObjectsDetected, ScryptedDevice, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, ScryptedNativeId, Setting, Settings, SettingValue, VideoCamera, VideoFrame, VideoFrameGenerator } from '@scrypted/sdk';
+import sdk, { Camera, DeviceProvider, DeviceState, EventListenerRegister, Image, MediaObject, MediaStreamDestination, MixinDeviceBase, MixinProvider, MotionSensor, ObjectDetection, ObjectDetectionGeneratorResult, ObjectDetectionModel, ObjectDetectionTypes, ObjectDetectionZone, ObjectDetector, ObjectsDetected, ScryptedDevice, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, ScryptedNativeId, Setting, Settings, SettingValue, VideoCamera, VideoFrame, VideoFrameGenerator } from '@scrypted/sdk';
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import crypto from 'crypto';
 import { AutoenableMixinProvider } from "../../../common/src/autoenable-mixin-provider";
@@ -8,6 +8,7 @@ import { SettingsMixinDeviceBase } from "../../../common/src/settings-mixin";
 import { serverSupportsMixinEventMasking } from './server-version';
 import { getAllDevices, safeParseJson } from './util';
 import { FFmpegVideoFrameGenerator } from './ffmpeg-videoframes-no-sharp';
+import os from 'os';
 
 const polygonOverlap = require('polygon-overlap');
 const insidePolygon = require('point-inside-polygon');
@@ -296,22 +297,21 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
   async createFrameGenerator(signal: Deferred<void>, options: {
     snapshotPipeline: boolean,
     suppress?: boolean,
-  }, updatePipelineStatus: (status: string) => void) {
+  }, updatePipelineStatus: (status: string) => void): Promise<AsyncGenerator<VideoFrame, any, unknown>> {
 
-    let newPipeline: string = this.newPipeline;
-    if (!this.hasMotionType && (!newPipeline || newPipeline === 'Default')) {
-      if (options.snapshotPipeline) {
-        newPipeline = 'Snapshot';
-        this.console.warn(`Due to limited performance, Snapshot mode is being used with ${this.plugin.statsSnapshotConcurrent} actively detecting cameras.`);
-      }
+    let frameGenerator: string = this.frameGenerator;
+    if (!this.hasMotionType && options.snapshotPipeline) {
+      frameGenerator = 'Snapshot';
+      this.console.warn(`Due to limited performance, Snapshot mode is being used with ${this.plugin.statsSnapshotConcurrent} actively detecting cameras.`);
     }
 
-    if (newPipeline === 'Snapshot' && !this.hasMotionType) {
+    if (frameGenerator === 'Snapshot' && !this.hasMotionType) {
       options.snapshotPipeline = true;
-      this.console.log('decoder:', 'Snapshot +', this.objectDetection.name);
+      this.console.log('Snapshot', '+', this.objectDetection.name);
       const self = this;
       return (async function* gen() {
         try {
+          const flush = async () => {};
           while (!signal.finished) {
             const now = Date.now();
             const sleeper = async () => {
@@ -319,7 +319,7 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
               if (diff > 0)
                 await sleep(diff);
             };
-            let image: MediaObject & VideoFrame;
+            let image: Image & MediaObject;
             try {
               updatePipelineStatus('takePicture');
               const mo = await self.cameraDevice.takePicture({
@@ -336,7 +336,13 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
 
             // self.console.log('yield')
             updatePipelineStatus('processing image');
-            yield image;
+            yield {
+              __json_copy_serialize_children: true,
+              timestamp: now,
+              queued: 0,
+              flush,
+              image,
+            };
             // self.console.log('done yield')
             await sleeper();
           }
@@ -348,7 +354,7 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
     }
     else {
       const destination: MediaStreamDestination = this.hasMotionType ? 'low-resolution' : 'local-recorder';
-      const videoFrameGenerator = systemManager.getDeviceById<VideoFrameGenerator>(newPipeline);
+      const videoFrameGenerator = systemManager.getDeviceById<VideoFrameGenerator>(frameGenerator);
       if (!videoFrameGenerator)
         throw new Error('invalid VideoFrameGenerator');
       if (!options?.suppress)
@@ -363,6 +369,7 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
 
       return await videoFrameGenerator.generateVideoFrames(stream, {
         queue: 0,
+        fps: this.hasMotionType ? 4 : undefined,
         resize: this.model?.inputSize ? {
           width: this.model.inputSize[0],
           height: this.model.inputSize[1],
@@ -462,8 +469,9 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
       if (detected.detected.detectionId) {
         updatePipelineStatus('creating jpeg');
         // const start = Date.now();
-        const vf = await sdk.connectRPCObject(detected.videoFrame);
-        const jpeg = await vf.toBuffer({
+        let { image } = detected.videoFrame;
+        image = await sdk.connectRPCObject(image);
+        const jpeg = await image.toBuffer({
           format: 'jpg',
         });
         const mo = await sdk.mediaManager.createMediaObject(jpeg, 'image/jpeg');
@@ -471,11 +479,10 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
         this.setDetection(detected.detected, mo);
         // this.console.log('image saved', detected.detected.detections);
       }
-      const hadMotionDetected = this.motionDetected;
       this.reportObjectDetections(detected.detected);
       if (this.hasMotionType) {
-        if (!hadMotionDetected && this.motionDetected) {
-          // if new motion is detected, stop processing and exit loop allowing it to sleep.
+        if (this.motionDetected) {
+          // if motion is detected, stop processing and exit loop allowing it to sleep.
           clearInterval(interval);
           return true;
         }
@@ -658,18 +665,22 @@ class ObjectDetectionMixin extends SettingsMixinDeviceBase<VideoCamera & Camera 
     return BUILTIN_MOTION_SENSOR_REPLACE;
   }
 
-  get newPipeline() {
-    const newPipeline = this.storageSettings.values.newPipeline;
-    if (!newPipeline)
-      return newPipeline;
-    if (newPipeline === 'Snapshot')
-      return newPipeline;
+  get frameGenerator() {
+    const frameGenerator = this.storageSettings.values.newPipeline as string || 'Default';
+    if (frameGenerator === 'Snapshot')
+      return frameGenerator;
+
+    if (frameGenerator === 'Default' && !this.hasMotionType && os.cpus().length < 4) {
+      this.console.log('Less than 4 processors detected. Defaulting to snapshot mode.');
+      return 'Snapshot';
+    }
+
     const pipelines = getAllDevices().filter(d => d.interfaces.includes(ScryptedInterface.VideoFrameGenerator));
     const webcodec = pipelines.find(p => p.nativeId === 'webcodec');
     const gstreamer = pipelines.find(p => p.nativeId === 'gstreamer');
     const libav = pipelines.find(p => p.nativeId === 'libav');
     const ffmpeg = pipelines.find(p => p.nativeId === 'ffmpeg');
-    const use = pipelines.find(p => p.name === newPipeline) || webcodec || gstreamer || libav || ffmpeg;
+    const use = pipelines.find(p => p.name === frameGenerator) || webcodec || gstreamer || libav || ffmpeg;
     return use.id;
   }
 
@@ -932,34 +943,63 @@ class ObjectDetectionPlugin extends AutoenableMixinProvider implements Settings,
   storageSettings = new StorageSettings(this, {
     activeMotionDetections: {
       title: 'Active Motion Detection Sessions',
+      multiple: true,
       readonly: true,
+      onGet: async () => {
+        const motion = [...this.currentMixins.values()]
+          .map(d => [...d.currentMixins.values()].filter(dd => dd.hasMotionType)).flat();
+        const choices = motion.map(dd => dd.name);
+        const value = motion.filter(c => c.detectorRunning).map(dd => dd.name);
+        return {
+          choices,
+          value,
+        }
+      },
       mapGet: () => {
-        return [...this.currentMixins.values()]
-          .reduce((c1, v1) => c1 + [...v1.currentMixins.values()]
-            .reduce((c2, v2) => c2 + (v2.hasMotionType && v2.detectorRunning ? 1 : 0), 0), 0);
-      }
+        const motion = [...this.currentMixins.values()]
+          .map(d => [...d.currentMixins.values()].filter(dd => dd.hasMotionType)).flat();
+        const value = motion.filter(c => c.detectorRunning).map(dd => dd.name);
+        return value;
+      },
     },
     activeObjectDetections: {
       title: 'Active Object Detection Sessions',
+      multiple: true,
       readonly: true,
-      mapGet: () => {
-        // could use the stats variable...
-        return [...this.currentMixins.values()]
-          .reduce((c1, v1) => c1 + [...v1.currentMixins.values()]
-            .reduce((c2, v2) => c2 + (!v2.hasMotionType && v2.detectorRunning ? 1 : 0), 0), 0);
+      onGet: async () => {
+        const motion = [...this.currentMixins.values()]
+          .map(d => [...d.currentMixins.values()].filter(dd => !dd.hasMotionType)).flat();
+        const choices = motion.map(dd => dd.name);
+        const value = motion.filter(c => c.detectorRunning).map(dd => dd.name);
+        return {
+          choices,
+          value,
+        }
       },
-    }
+      mapGet: () => {
+        const motion = [...this.currentMixins.values()]
+          .map(d => [...d.currentMixins.values()].filter(dd => !dd.hasMotionType)).flat();
+        const value = motion.filter(c => c.detectorRunning).map(dd => dd.name);
+        return value;
+      },
+    },
   });
 
   shouldUseSnapshotPipeline() {
     this.pruneOldStatistics();
 
+    // find any concurrent cameras with as many or more that had passable results
     for (const [k, v] of this.objectDetectionStatistics.entries()) {
-      // check the stats history to see if any sessions
-      // with same or lower number of cameras were on the struggle bus.
+      if (v.dps > 2 && k >= this.statsSnapshotConcurrent)
+        return false;
+    }
+
+    // find any concurrent camera with less or as many that had struggle bus
+    for (const [k, v] of this.objectDetectionStatistics.entries()) {
       if (v.dps < 2 && k <= this.statsSnapshotConcurrent)
         return true;
     }
+
     return false;
   }
 
