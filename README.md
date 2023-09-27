@@ -1,5 +1,4 @@
-### $\color{red}{\textsf{This repository is deprecated.}}$ Please move to [arlo-local](https://github.com/brianschrameck/arlo-local).	
-
+### This repository is deprecated. Please move to [arlo-local](https://github.com/brianschrameck/arlo-local).	
 
 # Scrypted
 
